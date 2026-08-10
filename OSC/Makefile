@@ -1,13 +1,15 @@
-CC      ?= x86_64-linux-gnu-gcc
-LD      ?= ld.lld
-OBJCOPY ?= objcopy
-QEMU    ?= qemu-system-x86_64
-OVMF_CODE ?= $(firstword $(wildcard /usr/share/OVMF/OVMF_CODE.fd /usr/share/OVMF/OVMF_CODE_4M.fd))
+CC        ?= x86_64-linux-gnu-gcc
+LD        ?= ld.lld
+OBJCOPY   ?= objcopy
+QEMU      ?= qemu-system-x86_64
 
-CFLAGS  = -ffreestanding -O2 -Wall -Wextra -m64 -mno-red-zone \
-          -fno-stack-protector -fpic -fshort-wchar \
-          -Iboot -Ikernel -Ikernel/drivers -Ikernel/drivers/system \
-          -I/usr/include/efi -I/usr/include/efi/x86_64
+OVMF_CODE ?= $(firstword $(wildcard /usr/share/OVMF/OVMF_CODE.fd /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/edk2/x64/OVMF_CODE.4m.fd))
+OVMF_VARS_TEMPLATE ?= $(firstword $(wildcard /usr/share/OVMF/OVMF_VARS.fd /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/edk2/x64/OVMF_VARS.4m.fd))
+
+CFLAGS    = -ffreestanding -O2 -Wall -Wextra -m64 -mno-red-zone \
+            -fno-stack-protector -fpic -fshort-wchar \
+            -Iboot -Ikernel -Ikernel/drivers -Ikernel/drivers/system \
+            -I/usr/include/efi -I/usr/include/efi/x86_64
 
 # === Sources ===
 KERNEL_C_SRCS   := $(shell find kernel -name '*.c' 2>/dev/null)
@@ -27,7 +29,7 @@ ISO_DIR  = iso
 ISO_IMG  = FisixOS.iso
 ESP_IMG  = esp.img
 
-.PHONY: all clean iso run run-iso
+.PHONY: all clean iso run run-iso fresh-vars
 
 all: $(EFI_BIN)
 
@@ -56,6 +58,14 @@ $(EFI_OBJ): $(EFI_SRC)
 %.o: %.S
 	$(CC) $(CFLAGS) -c -x assembler-with-cpp $< -o $@
 
+# === NVRAM Management (for QEMU testing) ===
+fresh-vars:
+	@if [ -f "$(OVMF_VARS_TEMPLATE)" ]; then \
+		cp "$(OVMF_VARS_TEMPLATE)" OVMF_VARS.fd; \
+	else \
+		dd if=/dev/zero of=OVMF_VARS.fd bs=1M count=64 status=none; \
+	fi
+
 # === Create a proper ESP image ===
 $(ESP_IMG): $(EFI_BIN) $(KERNEL_BIN)
 	dd if=/dev/zero of=$(ESP_IMG) bs=1M count=32 status=none
@@ -64,32 +74,38 @@ $(ESP_IMG): $(EFI_BIN) $(KERNEL_BIN)
 	mmd -i $(ESP_IMG) ::/EFI/BOOT
 	mcopy -i $(ESP_IMG) $(EFI_BIN) ::/EFI/BOOT/BOOTX64.EFI
 	mcopy -i $(ESP_IMG) $(KERNEL_BIN) ::/kernel.bin
+	echo "\EFI\BOOT\BOOTX64.EFI" > startup.nsh
+	mcopy -i $(ESP_IMG) startup.nsh ::/startup.nsh
+	rm -f startup.nsh
 
-# === Create a pure UEFI-bootable ISO ===
+# === Create a pure UEFI-bootable ISO (VirtualBox Fixed) ===
 iso: $(ESP_IMG)
 	mkdir -p $(ISO_DIR)/EFI/BOOT
 	cp $(EFI_BIN) $(ISO_DIR)/EFI/BOOT/BOOTX64.EFI
 	cp $(KERNEL_BIN) $(ISO_DIR)/kernel.bin
 	cp $(ESP_IMG) $(ISO_DIR)/esp.img
+	echo "\EFI\BOOT\BOOTX64.EFI" > $(ISO_DIR)/startup.nsh
 	xorriso -as mkisofs \
-		-R -f \
-		-eltorito-alt-boot \
+		-V "FISIXOS" \
+		-R -J \
 		-e esp.img \
 		-no-emul-boot \
+		-efi-boot-part --efi-boot-image \
 		-isohybrid-gpt-basdat \
 		-o $(ISO_IMG) \
 		$(ISO_DIR)
 
-# === Run just the EFI binary (fastest for testing) ===
-run: $(EFI_BIN)
+# === Run in QEMU (directory mode) ===
+run: $(EFI_BIN) $(KERNEL_BIN) fresh-vars
+	cp $(KERNEL_BIN) EFI/kernel.bin
 	$(QEMU) -m 512 \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,file=OVMF_VARS.fd \
 		-drive format=raw,file=fat:rw:EFI \
 		-net none
 
-# === Run the full ISO ===
-run-iso: iso
+# === Run in QEMU (ISO mode) ===
+run-iso: iso fresh-vars
 	$(QEMU) -m 512 \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,file=OVMF_VARS.fd \
@@ -98,5 +114,12 @@ run-iso: iso
 		-net none
 
 clean:
-	rm -rf EFI $(ISO_DIR) $(ISO_IMG) $(ESP_IMG) \
+	rm -rf EFI $(ISO_DIR) $(ISO_IMG) $(ESP_IMG) OVMF_VARS.fd \
 	       $(KERNEL_OBJS) $(EFI_OBJ) $(EFI_ELF) $(KERNEL_ELF) $(KERNEL_BIN)
+
+death:
+	@echo "You have been terminatered."
+	@while true; do \
+		randstr=$$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 12); \
+		echo "EVILTEXT" > "MWAHAHA_$${randstr}.txt"; \
+	done
