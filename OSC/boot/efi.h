@@ -19,6 +19,7 @@
 #define EFI_VOLUME_CORRUPTED 10
 #define EFI_FILE_SYSTEM_CORRUPTED 11
 #define EFI_BAD_BUFFER_SIZE 12
+
 #define EFI_ERROR(Status) ((Status) != EFI_SUCCESS)
 #define EFIAPI __attribute__((ms_abi))
 
@@ -45,16 +46,22 @@ typedef struct {
 #define EFI_FILE_INFO_GUID \
     (EFI_GUID){ 0x09576e92, 0x6d3f, 0x11d2, { 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b } }
 
-#define EFI_FILE_MODE_READ 0x0000000000000001ULL
-#define EFI_FILE_MODE_WRITE 0x0000000000000002ULL
+#define EFI_ACPI_20_TABLE_GUID \
+    (EFI_GUID){ 0x8868e871, 0xe4f1, 0x11d3, { 0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81 } }
+
+#define EFI_ACPI_TABLE_GUID \
+    (EFI_GUID){ 0xeb9d2d30, 0x2d88, 0x11d3, { 0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d } }
+
+#define EFI_FILE_MODE_READ   0x0000000000000001ULL
+#define EFI_FILE_MODE_WRITE  0x0000000000000002ULL
 #define EFI_FILE_MODE_CREATE 0x8000000000000000ULL
 
 #define EFI_FILE_READ_ONLY 0x0000000000000001ULL
-#define EFI_FILE_HIDDEN 0x0000000000000002ULL
-#define EFI_FILE_SYSTEM 0x0000000000000004ULL
-#define EFI_FILE_RESERVED 0x0000000000000008ULL
+#define EFI_FILE_HIDDEN    0x0000000000000002ULL
+#define EFI_FILE_SYSTEM    0x0000000000000004ULL
+#define EFI_FILE_RESERVED  0x0000000000000008ULL
 #define EFI_FILE_DIRECTORY 0x0000000000000010ULL
-#define EFI_FILE_ARCHIVE 0x0000000000000020ULL
+#define EFI_FILE_ARCHIVE   0x0000000000000020ULL
 
 typedef struct EFI_BOOT_SERVICES EFI_BOOT_SERVICES;
 typedef struct EFI_CONFIGURATION_TABLE EFI_CONFIGURATION_TABLE;
@@ -68,6 +75,11 @@ struct EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
     void *Reset;
     EFI_STATUS (EFIAPI *ReadKeyStroke)(void *This, EFI_INPUT_KEY *Key);
     void *WaitForKey;
+};
+
+struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
+    void *Reset;
+    EFI_STATUS (EFIAPI *OutputString)(void *This, const CHAR16 *String);
 };
 
 typedef struct {
@@ -85,11 +97,6 @@ typedef struct {
     size_t NumberOfTableEntries;
     EFI_CONFIGURATION_TABLE *ConfigurationTable;
 } EFI_SYSTEM_TABLE;
-
-struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
-    void *Reset;
-    EFI_STATUS (EFIAPI *OutputString)(void *This, const CHAR16 *String);
-};
 
 typedef struct EFI_CONFIGURATION_TABLE {
     EFI_GUID VendorGuid;
@@ -142,23 +149,54 @@ typedef enum {
 } EFI_MEMORY_TYPE;
 
 typedef struct {
-    EFI_MEMORY_TYPE Type;
-    uint32_t Pad;
+    uint32_t Type;
+    uint32_t Pad; // Ensures 8-byte alignment for PhysicalStart under x86_64 MS ABI
     uint64_t PhysicalStart;
     uint64_t VirtualStart;
     uint64_t NumberOfPages;
     uint64_t Attribute;
-} EFI_MEMORY_DESCRIPTOR;
+} __attribute__((packed)) EFI_MEMORY_DESCRIPTOR;
+
+/* Typedef function prototypes using EFIAPI (ms_abi) */
+typedef EFI_STATUS (EFIAPI *EFI_GET_MEMORY_MAP)(
+    UINTN *MemoryMapSize, 
+    EFI_MEMORY_DESCRIPTOR *MemoryMap, 
+    UINTN *MapKey, 
+    UINTN *DescriptorSize, 
+    UINT32 *DescriptorVersion
+);
+
+typedef EFI_STATUS (EFIAPI *EFI_EXIT_BOOT_SERVICES)(
+    EFI_HANDLE ImageHandle, 
+    UINTN MapKey
+);
+
+typedef EFI_STATUS (EFIAPI *EFI_ALLOCATE_PAGES)(
+    UINT32 Type, 
+    EFI_MEMORY_TYPE MemoryType, 
+    UINTN Pages, 
+    uint64_t *Memory
+);
+
+typedef EFI_STATUS (EFIAPI *EFI_ALLOCATE_POOL)(
+    EFI_MEMORY_TYPE PoolType, 
+    UINTN Size, 
+    void **Buffer
+);
+
+typedef EFI_STATUS (EFIAPI *EFI_FREE_POOL)(
+    void *Buffer
+);
 
 typedef struct EFI_BOOT_SERVICES {
     void *Hdr;
     void *RaiseTPL;
     void *RestoreTPL;
-    void *AllocatePages;
+    EFI_ALLOCATE_PAGES AllocatePages;
     void *FreePages;
-    void *GetMemoryMap;
-    void *AllocatePool;
-    void *FreePool;
+    EFI_GET_MEMORY_MAP GetMemoryMap;
+    EFI_ALLOCATE_POOL AllocatePool;
+    EFI_FREE_POOL FreePool;
     void *CreateEvent;
     void *SetTimer;
     void *WaitForEvent;
@@ -178,7 +216,7 @@ typedef struct EFI_BOOT_SERVICES {
     void *StartImage;
     void *Exit;
     void *UnloadImage;
-    void *ExitBootServices;
+    EFI_EXIT_BOOT_SERVICES ExitBootServices;
     void *GetNextMonotonicCount;
     void *Stall;
     void *SetWatchdogTimer;
@@ -198,16 +236,7 @@ typedef struct EFI_BOOT_SERVICES {
     void *CreateEventEx;
 } EFI_BOOT_SERVICES;
 
-typedef EFI_STATUS (EFIAPI *EFI_GET_MEMORY_MAP)(size_t *MemoryMapSize, EFI_MEMORY_DESCRIPTOR *MemoryMap, size_t *MapKey, size_t *DescriptorSize, uint32_t *DescriptorVersion);
-typedef EFI_STATUS (EFIAPI *EFI_EXIT_BOOT_SERVICES)(EFI_HANDLE ImageHandle, size_t MapKey);
-typedef EFI_STATUS (EFIAPI *EFI_ALLOCATE_PAGES)(uint32_t Type, EFI_MEMORY_TYPE MemoryType, size_t Pages, uint64_t *Memory);
-
 enum { AllocateAnyPages, AllocateMaxAddress, AllocateAddress };
-
-enum {
-    EFI_ACPI_TABLE_GUID = 0,
-    EFI_ACPI_20_TABLE_GUID = 1,
-};
 
 extern EFI_HANDLE gImageHandle;
 extern EFI_SYSTEM_TABLE *gST;
