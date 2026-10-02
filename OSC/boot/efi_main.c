@@ -836,8 +836,12 @@ static EFI_STATUS efi_load_kernel(void)
 
     allocate_pages = (EFI_ALLOCATE_PAGES)gBS->AllocatePages;
     status = allocate_pages(AllocateAddress, EfiLoaderData, KERNEL_MAX_BYTES / 4096, &address);
+    if (EFI_ERROR(status)) {
+        address = 0;
+        status = allocate_pages(AllocateAnyPages, EfiLoaderData, KERNEL_MAX_BYTES / 4096, &address);
+    }
     if (!EFI_ERROR(status)) {
-        uint8_t *memory = (uint8_t *)(uintptr_t)address;
+        uint8_t *memory = (uint8_t *)(uintptr_t)KERNEL_LOAD_ADDRESS;
         for (UINTN i = 0; i < KERNEL_MAX_BYTES; ++i) memory[i] = 0;
         status = kernel->Read(kernel, &bytes, memory);
         if (bytes == 0) status = EFI_LOAD_ERROR;

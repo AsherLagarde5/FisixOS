@@ -36,7 +36,7 @@ all: $(EFI_BIN)
 kernel: $(KERNEL_BIN)
 
 $(KERNEL_BIN): $(KERNEL_RUNTIME_OBJS) kernel/kernel.ld
-	$(CC) -nostdlib -no-pie -Wl,-T,kernel/kernel.ld -o $(KERNEL_ELF) $(KERNEL_RUNTIME_OBJS)
+	$(CC) -nostdlib -no-pie -Wl,-T,kernel/kernel.ld -o $(KERNEL_ELF) kernel/entry.o $(filter-out kernel/entry.o,$(KERNEL_RUNTIME_OBJS))
 	$(OBJCOPY) -O binary $(KERNEL_ELF) $(KERNEL_BIN)
 	rm -f $(KERNEL_ELF)
 
@@ -83,17 +83,21 @@ iso: $(ESP_IMG)
 	mkdir -p $(ISO_DIR)/EFI/BOOT
 	cp $(EFI_BIN) $(ISO_DIR)/EFI/BOOT/BOOTX64.EFI
 	cp $(KERNEL_BIN) $(ISO_DIR)/kernel.bin
-	cp $(ESP_IMG) $(ISO_DIR)/esp.img
+	dd if=/dev/zero of=$(ISO_DIR)/esp.img bs=1M count=2 status=none
+	mkfs.fat -F 12 $(ISO_DIR)/esp.img
+	mmd -i $(ISO_DIR)/esp.img ::/EFI
+	mmd -i $(ISO_DIR)/esp.img ::/EFI/BOOT
+	mcopy -i $(ISO_DIR)/esp.img $(EFI_BIN) ::/EFI/BOOT/BOOTX64.EFI
+	mcopy -i $(ISO_DIR)/esp.img $(KERNEL_BIN) ::/kernel.bin
 	echo "\EFI\BOOT\BOOTX64.EFI" > $(ISO_DIR)/startup.nsh
 	xorriso -as mkisofs \
 		-V "FISIXOS" \
 		-R -J \
 		-e esp.img \
 		-no-emul-boot \
-		-efi-boot-part --efi-boot-image \
-		-isohybrid-gpt-basdat \
 		-o $(ISO_IMG) \
 		$(ISO_DIR)
+
 
 # === Run in QEMU (directory mode) ===
 run: $(EFI_BIN) $(KERNEL_BIN) fresh-vars

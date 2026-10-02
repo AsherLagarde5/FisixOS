@@ -42,22 +42,22 @@ void idt_init(void)
     idtp.base = (uint64_t)&idt[0];
     
     /* Set up IRQ handlers (0-15) */
-    idt_set_gate(0, (uint64_t)irq0, 0x08, 0x8E);
-    idt_set_gate(1, (uint64_t)irq1, 0x08, 0x8E);
-    idt_set_gate(2, (uint64_t)irq2, 0x08, 0x8E);
-    idt_set_gate(3, (uint64_t)irq3, 0x08, 0x8E);
-    idt_set_gate(4, (uint64_t)irq4, 0x08, 0x8E);
-    idt_set_gate(5, (uint64_t)irq5, 0x08, 0x8E);
-    idt_set_gate(6, (uint64_t)irq6, 0x08, 0x8E);
-    idt_set_gate(7, (uint64_t)irq7, 0x08, 0x8E);
-    idt_set_gate(8, (uint64_t)irq8, 0x08, 0x8E);
-    idt_set_gate(9, (uint64_t)irq9, 0x08, 0x8E);
-    idt_set_gate(10, (uint64_t)irq10, 0x08, 0x8E);
-    idt_set_gate(11, (uint64_t)irq11, 0x08, 0x8E);
-    idt_set_gate(12, (uint64_t)irq12, 0x08, 0x8E);
-    idt_set_gate(13, (uint64_t)irq13, 0x08, 0x8E);
-    idt_set_gate(14, (uint64_t)irq14, 0x08, 0x8E);
-    idt_set_gate(15, (uint64_t)irq15, 0x08, 0x8E);
+    idt_set_gate(0, (uint64_t)irq0, 0x10, 0x8E);
+    idt_set_gate(1, (uint64_t)irq1, 0x10, 0x8E);
+    idt_set_gate(2, (uint64_t)irq2, 0x10, 0x8E);
+    idt_set_gate(3, (uint64_t)irq3, 0x10, 0x8E);
+    idt_set_gate(4, (uint64_t)irq4, 0x10, 0x8E);
+    idt_set_gate(5, (uint64_t)irq5, 0x10, 0x8E);
+    idt_set_gate(6, (uint64_t)irq6, 0x10, 0x8E);
+    idt_set_gate(7, (uint64_t)irq7, 0x10, 0x8E);
+    idt_set_gate(8, (uint64_t)irq8, 0x10, 0x8E);
+    idt_set_gate(9, (uint64_t)irq9, 0x10, 0x8E);
+    idt_set_gate(10, (uint64_t)irq10, 0x10, 0x8E);
+    idt_set_gate(11, (uint64_t)irq11, 0x10, 0x8E);
+    idt_set_gate(12, (uint64_t)irq12, 0x10, 0x8E);
+    idt_set_gate(13, (uint64_t)irq13, 0x10, 0x8E);
+    idt_set_gate(14, (uint64_t)irq14, 0x10, 0x8E);
+    idt_set_gate(15, (uint64_t)irq15, 0x10, 0x8E);
     
     /* Load the IDT */
     idt_load((uint64_t)&idtp);
