@@ -258,3 +258,5 @@ irq_common:
 
     addq $16, %rsp
     iretq
+
+.section .note.GNU-stack,"",@progbits

@@ -63,6 +63,19 @@ typedef struct {
 #define EFI_FILE_DIRECTORY 0x0000000000000010ULL
 #define EFI_FILE_ARCHIVE   0x0000000000000020ULL
 
+/* EFI_TABLE_HEADER is 24 bytes, not a single pointer. The old code used
+   void *Hdr (8 bytes) here and in EFI_BOOT_SERVICES, shifting every
+   following field by 16 bytes: BootServices, ConOut, etc. were read
+   from the wrong offsets, so OVMF crashed with #UD at a bogus RIP
+   as soon as the loader touched firmware services. */
+typedef struct {
+    uint64_t Signature;
+    uint32_t Revision;
+    uint32_t HeaderSize;
+    uint32_t CRC32;
+    uint32_t Reserved;
+} EFI_TABLE_HEADER;
+
 typedef struct EFI_BOOT_SERVICES EFI_BOOT_SERVICES;
 typedef struct EFI_CONFIGURATION_TABLE EFI_CONFIGURATION_TABLE;
 
@@ -83,7 +96,7 @@ struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
 };
 
 typedef struct {
-    void *Hdr;
+    EFI_TABLE_HEADER Hdr;
     void *FirmwareVendor;
     uint32_t FirmwareRevision;
     EFI_HANDLE ConsoleInHandle;
@@ -104,19 +117,41 @@ typedef struct EFI_CONFIGURATION_TABLE {
 } EFI_CONFIGURATION_TABLE;
 
 typedef struct {
+    uint16_t Year;
+    uint8_t Month;
+    uint8_t Day;
+    uint8_t Hour;
+    uint8_t Minute;
+    uint8_t Second;
+    uint8_t Pad1;
+    uint32_t Nanosecond;
+    int16_t TimeZone;
+    uint8_t Daylight;
+    uint8_t Pad2;
+} EFI_TIME;
+
+typedef struct {
     UINT64 Size;
     UINT64 FileSize;
     UINT64 PhysicalSize;
-    UINT32 Attribute;
+    EFI_TIME CreateTime;
+    EFI_TIME LastAccessTime;
+    EFI_TIME ModificationTime;
+    UINT64 Attribute;
     CHAR16 FileName[1];
 } EFI_FILE_INFO;
 
 typedef struct {
-    EFI_STATUS (EFIAPI *Reset)(void *This, BOOLEAN ExtendedVerification);
+    UINT64 Revision;
     EFI_STATUS (EFIAPI *OpenVolume)(void *This, EFI_FILE_PROTOCOL **Root);
 } EFI_SIMPLE_FILE_SYSTEM_PROTOCOL;
 
 struct EFI_FILE_PROTOCOL {
+    /* UEFI 13.5.1: the first field is Revision, not Open. Omitting it
+       shifted every method by 8 bytes, so root->Open jumped to the
+       Revision value 0x00020000 itself (the "0x20000 Open pointer"
+       anomaly) instead of the real Open at the next qword. */
+    UINT64 Revision;
     EFI_STATUS (EFIAPI *Open)(EFI_FILE_PROTOCOL *This, EFI_FILE_PROTOCOL **NewHandle, const CHAR16 *FileName, UINT64 OpenMode, UINT64 Attributes);
     EFI_STATUS (EFIAPI *Close)(EFI_FILE_PROTOCOL *This);
     EFI_STATUS (EFIAPI *Delete)(EFI_FILE_PROTOCOL *This);
@@ -189,7 +224,7 @@ typedef EFI_STATUS (EFIAPI *EFI_FREE_POOL)(
 );
 
 typedef struct EFI_BOOT_SERVICES {
-    void *Hdr;
+    EFI_TABLE_HEADER Hdr;
     void *RaiseTPL;
     void *RestoreTPL;
     EFI_ALLOCATE_PAGES AllocatePages;

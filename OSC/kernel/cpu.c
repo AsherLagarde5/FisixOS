@@ -37,12 +37,29 @@ int cpu_get_info(cpu_info_t *info)
         g_cpu_info.vendor = CPU_VENDOR_INTEL;
     } else if (vendor_b == 0x68747541u && vendor_d == 0x69746e65u && vendor_c == 0x444d4163u) {
         g_cpu_info.vendor = CPU_VENDOR_AMD;
+    } else {
+        g_cpu_info.vendor = CPU_VENDOR_UNKNOWN;
+    }
+
+    /* Leaf 1 is only valid if the CPU reports it. */
+    if (eax < 1) {
+        return 0;
     }
 
     cpuid(1, &eax, &ebx, &ecx, &edx);
     stepping = eax & 0xFU;
     model = (eax >> 4) & 0xFU;
     family = (eax >> 8) & 0xFU;
+    /* Extended family/model, per the Intel/AMD CPUID spec:
+       family 0xF adds the extended family, and family 0x6/0xF
+       add the extended model shifted by 4. Without this, modern
+       CPUs all report the same truncated family/model. */
+    if (family == 0x6U || family == 0xFU) {
+        model += ((eax >> 16) & 0xFU) << 4;
+    }
+    if (family == 0xFU) {
+        family += (eax >> 20) & 0xFFU;
+    }
 
     g_cpu_info.family = family;
     g_cpu_info.model = model;

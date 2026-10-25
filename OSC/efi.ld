@@ -4,22 +4,25 @@ ENTRY(efi_main)
 
 SECTIONS
 {
-    /* A fixed image at address zero cannot be loaded by UEFI firmware.
-       Keep the image in conventional low memory until PE relocations are
-       introduced. */
-    . = 0x100000;
+    /* Link at 0x101000 so objcopy (image base 0x100000) puts .text at
+       RVA 0x1000, after the PE headers. Linking at exactly 0x100000
+       put .text at RVA 0, which OVMF rejects as Unsupported. */
+    . = 0x101000;
 
     .text : {
         *(.text .text.*)
     }
+    . = ALIGN(0x1000);
 
     .rodata : {
         *(.rodata .rodata.*)
     }
+    . = ALIGN(0x1000);
 
     .data : {
         *(.data .data.*)
     }
+    . = ALIGN(0x1000);
 
     .bss (NOLOAD) : {
         *(.bss .bss.*)

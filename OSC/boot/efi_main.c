@@ -8,6 +8,33 @@ EFI_HANDLE gImageHandle;
 EFI_SYSTEM_TABLE *gST;
 EFI_BOOT_SERVICES *gBS;
 
+/* Minimal COM1 serial debug, for QEMU: OVMF also logs to COM1, so these
+   markers appear in the serial log before any ConOut output. */
+static void serial_outb(uint16_t port, uint8_t v) {
+    __asm__ volatile ("outb %0, %1" : : "a"(v), "Nd"(port));
+}
+static uint8_t serial_inb(uint16_t port) {
+    uint8_t v;
+    __asm__ volatile ("inb %1, %0" : "=a"(v) : "Nd"(port));
+    return v;
+}
+static void serial_mark(const char *s) {
+    serial_outb(0x3F8 + 1, 0x00);
+    serial_outb(0x3F8 + 3, 0x80);
+    serial_outb(0x3F8 + 0, 0x03);
+    serial_outb(0x3F8 + 1, 0x00);
+    serial_outb(0x3F8 + 3, 0x03);
+    serial_outb(0x3F8 + 2, 0xC7);
+    serial_outb(0x3F8 + 4, 0x0B);
+    while (s && *s) {
+        uint32_t t = 100000;
+        while ((serial_inb(0x3F8 + 5) & 0x20) == 0 && t-- > 0) { }
+        serial_outb(0x3F8, (uint8_t)*s);
+        s++;
+    }
+    serial_outb(0x3F8, (uint8_t)'\n');
+}
+
 static const CHAR16 boot_message[] = {
     'F','i','s','i','x',' ','O','S',' ','E','F','I',' ','b','o','o','t','\r','\n',0
 };
@@ -18,6 +45,7 @@ typedef enum {
 } TerminalMode;
 
 static void terminal_run_nano(void);
+static void terminal_first_time_setup(void);
 static int terminal_login(void);
 static int terminal_read_line(CHAR16 *line, size_t max_length);
 static int terminal_execute_command(const CHAR16 *command);
@@ -79,6 +107,41 @@ static void terminal_write_line(const CHAR16 *text)
 {
     terminal_write(text);
     terminal_write((const CHAR16[]){ '\r', '\n', 0 });
+}
+
+/* First-time setup writes plain ASCII strings, so it converts them to
+   CHAR16 here instead of spelling every message out as a CHAR16 array
+   literal like the older terminal code does. */
+static void terminal_write_ascii(const char *text)
+{
+    CHAR16 buffer[256];
+    size_t i = 0;
+    while (text && text[i] && i + 1 < sizeof(buffer) / sizeof(buffer[0])) {
+        buffer[i] = (CHAR16)(uint8_t)text[i];
+        i++;
+    }
+    buffer[i] = 0;
+    terminal_write(buffer);
+}
+
+static void terminal_write_ascii_line(const char *text)
+{
+    terminal_write_ascii(text);
+    terminal_write((const CHAR16[]){ '\r', '\n', 0 });
+}
+
+static int terminal_equal_str(const CHAR16 *a, const CHAR16 *b)
+{
+    if (!a || !b) return 0;
+    while (*a && *b && *a == *b) { a++; b++; }
+    return *a == 0 && *b == 0;
+}
+
+static int terminal_has_space(const CHAR16 *s)
+{
+    if (!s) return 0;
+    while (*s) { if (*s == ' ') return 1; s++; }
+    return 0;
 }
 
 static void terminal_set_drive(CHAR16 drive)
@@ -794,6 +857,133 @@ static void terminal_run_batch(void)
     terminal_run_batch_file(autoexec_batch);
 }
 
+/* Save the setup choice (not any Wi-Fi password) to \fisix_setup.txt,
+   so a later boot can tell setup already ran even if the user store
+   is checked separately. Best effort: a failed record write does not
+   block login, because the saved user account is the real gate. */
+static void terminal_save_setup_record(const char *network, const CHAR16 *ssid)
+{
+    EFI_FILE_PROTOCOL *file = 0;
+    char record[192];
+    size_t i = 0, j = 0;
+    UINTN count;
+    const char *p;
+
+    for (p = "fisix_setup=done\nnetwork="; *p && i + 1 < sizeof(record); p++) record[i++] = *p;
+    for (p = network; *p && i + 1 < sizeof(record); p++) record[i++] = *p;
+    if (ssid && ssid[0]) {
+        for (p = "\nssid="; *p && i + 1 < sizeof(record); p++) record[i++] = *p;
+        while (ssid[j] && i + 1 < sizeof(record)) record[i++] = (char)(uint8_t)ssid[j++];
+    }
+    if (i + 1 < sizeof(record)) record[i++] = '\n';
+    record[i] = 0;
+
+    if (!terminal_open_file((const CHAR16[]){ '\\', 'f', 'i', 's', 'i', 'x', '_', 's', 'e', 't', 'u', 'p', '.', 't', 'x', 't', 0 },
+                            EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, EFI_FILE_ARCHIVE, &file))
+        return;
+    if (file->SetPosition && EFI_ERROR(file->SetPosition(file, 0))) { file->Close(file); return; }
+    count = i;
+    if (!EFI_ERROR(file->Write(file, &count, record)) && file->Flush) file->Flush(file);
+    file->Close(file);
+}
+
+/* First-time setup. Runs only on a first boot (no saved user store),
+   before the normal login screen. Steps: create the first admin
+   account, then pick an internet option. There is no network driver
+   in FisixOS yet, so the internet step records the choice for later
+   and continues offline instead of pretending to connect. The Wi-Fi
+   password, if typed, is never written to disk. */
+static void terminal_first_time_setup(void)
+{
+    CHAR16 username[32];
+    CHAR16 password[32];
+    CHAR16 confirm[32];
+    CHAR16 ssid[32];
+    CHAR16 wifi_password[32];
+    CHAR16 choice[8];
+    const char *network = "skip";
+    int i;
+
+    serial_mark("FIRST_SETUP_START");
+    terminal_write_ascii_line("========================================");
+    terminal_write_ascii_line("Welcome to FisixOS - First-Time Setup");
+    terminal_write_ascii_line("========================================");
+    terminal_write_ascii_line("This only runs once, on the first boot.");
+    terminal_write_ascii_line("After setup, log in with the account you create here.");
+    terminal_write_ascii_line("");
+
+    for (;;) {
+        terminal_write_ascii("Choose a username: ");
+        if (terminal_read_line(username, sizeof(username) / sizeof(username[0])) == 0) continue;
+        if (terminal_has_space(username)) {
+            terminal_write_ascii_line("Usernames cannot contain spaces. Try again.");
+            continue;
+        }
+        for (;;) {
+            terminal_write_ascii("Choose a password: ");
+            terminal_echo_enabled = 0;
+            terminal_read_line(password, sizeof(password) / sizeof(password[0]));
+            terminal_echo_enabled = 1;
+            if (password[0] == 0) continue;
+            terminal_write_ascii("Type the password again: ");
+            terminal_echo_enabled = 0;
+            terminal_read_line(confirm, sizeof(confirm) / sizeof(confirm[0]));
+            terminal_echo_enabled = 1;
+            if (!terminal_equal_str(password, confirm)) {
+                terminal_write_ascii_line("Passwords did not match. Try again.");
+                continue;
+            }
+            break;
+        }
+        if (accounts_setup_first_user(username, password)) break;
+        terminal_write_ascii_line("Could not save that account. Try again.");
+    }
+    serial_mark("FIRST_SETUP_ACCOUNT_OK");
+
+    terminal_write_ascii_line("");
+    terminal_write_ascii_line("Internet setup:");
+    terminal_write_ascii_line("  1 = Wired (Ethernet)");
+    terminal_write_ascii_line("  2 = Wi-Fi");
+    terminal_write_ascii_line("  3 = Skip for now");
+    terminal_write_ascii("Choose 1, 2 or 3: ");
+    terminal_read_line(choice, sizeof(choice) / sizeof(choice[0]));
+    ssid[0] = 0;
+    if (choice[0] == '1') {
+        network = "wired";
+        serial_mark("FIRST_SETUP_NET_WIRED");
+        terminal_write_ascii_line("Wired selected.");
+    } else if (choice[0] == '2') {
+        network = "wifi";
+        serial_mark("FIRST_SETUP_NET_WIFI");
+        terminal_write_ascii("Wi-Fi network name (SSID): ");
+        terminal_read_line(ssid, sizeof(ssid) / sizeof(ssid[0]));
+        terminal_write_ascii("Wi-Fi password: ");
+        terminal_echo_enabled = 0;
+        terminal_read_line(wifi_password, sizeof(wifi_password) / sizeof(wifi_password[0]));
+        terminal_echo_enabled = 1;
+        /* Deliberately never saved: clear it as soon as it is read. */
+        for (i = 0; i < 32; i++) wifi_password[i] = 0;
+        terminal_write_ascii_line("Wi-Fi selected.");
+    } else {
+        network = "skip";
+        serial_mark("FIRST_SETUP_NET_SKIP");
+        terminal_write_ascii_line("Skipping internet setup. You can set it up later.");
+    }
+
+    terminal_write_ascii_line("Note: FisixOS does not have a network driver yet,");
+    terminal_write_ascii_line("so this choice is saved for later and the system");
+    terminal_write_ascii_line("will continue offline for now. No explosion today.");
+    terminal_save_setup_record(network, ssid);
+
+    terminal_write_ascii_line("");
+    terminal_write_ascii_line("Setup complete!");
+    terminal_write_ascii("Welcome to FisixOS, ");
+    terminal_write(username);
+    terminal_write_ascii_line("");
+    terminal_write_ascii_line("Please log in with your new account.");
+    serial_mark("FIRST_SETUP_DONE");
+}
+
 static int terminal_login(void)
 {
     CHAR16 username[32];
@@ -915,14 +1105,23 @@ static EFI_STATUS efi_leave_boot_services(kernel_boot_info_t *boot_info)
 
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 {
+    serial_mark("EFI_MAIN_START");
     gImageHandle = ImageHandle;
     gST = SystemTable;
     gBS = SystemTable ? SystemTable->BootServices : NULL;
+    serial_mark("EFI_MAIN_GBS_SET");
 
     eosfs_init();
+    serial_mark("EFI_MAIN_EOSFS_OK");
     accounts_init();
+    serial_mark("EFI_MAIN_ACCOUNTS_OK");
 
+    serial_mark("EFI_MAIN_BEFORE_BOOTMSG");
     terminal_write(boot_message);
+    serial_mark("EFI_MAIN_AFTER_BOOTMSG");
+    if (accounts_first_boot()) {
+        terminal_first_time_setup();
+    }
     terminal_run_batch();
     terminal_login();
     terminal_run_shell();

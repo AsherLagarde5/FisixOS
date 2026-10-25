@@ -48,18 +48,34 @@ int pci_find_device(uint8_t class_code, uint8_t subclass, uint8_t prog_if, pci_d
 
     for (bus = 0; bus < 256u; ++bus) {
         for (device = 0; device < 32u; ++device) {
+            int multifunction = 0;
             for (function = 0; function < 8u; ++function) {
-                uint16_t vendor_id = pci_read_config16(bus, device, function, 0x00u);
+                uint16_t vendor_id;
                 uint8_t header_type;
                 uint8_t class_device;
                 uint8_t class_subclass;
                 uint8_t class_prog_if;
+                if (function > 0 && !multifunction) {
+                    break;
+                }
+                vendor_id = pci_read_config16(bus, device, function, 0x00u);
 
                 if (vendor_id == 0xFFFFu) {
+                    /* No device here. A non-multifunction device has
+                       no further functions to check, so skip them
+                       instead of probing 7 empty slots. */
+                    if (function == 0) {
+                        break;
+                    }
                     continue;
                 }
 
                 header_type = pci_read_config8(bus, device, function, 0x0Eu);
+                if (function == 0) {
+                    multifunction = (header_type & 0x80u) != 0;
+                } else if (!multifunction) {
+                    break;
+                }
                 class_device = pci_read_config8(bus, device, function, 0x0Bu);
                 class_subclass = pci_read_config8(bus, device, function, 0x0Au);
                 class_prog_if = pci_read_config8(bus, device, function, 0x09u);

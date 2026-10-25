@@ -1,3 +1,47 @@
+#include "accounts.h"
+
+/* Restored from the pre-patch version: the "safer accounts" patch kept
+   only the file helpers and dropped the include, the account types,
+   the globals, and every public function, so the EFI loader could no
+   longer link at all. The helpers below are the safer versions. */
+#define ACCOUNT_TEXT_MAX 31
+#define ACCOUNT_STORE_MAGIC 0x46555352u
+
+typedef struct {
+    CHAR16 name[ACCOUNT_TEXT_MAX + 1];
+    CHAR16 password[ACCOUNT_TEXT_MAX + 1];
+    int admin;
+} account_t;
+
+typedef struct {
+    uint32_t magic;
+    uint32_t count;
+    account_t entries[FISIX_MAX_USERS];
+} account_store_t;
+
+static account_t accounts[FISIX_MAX_USERS];
+static int account_count;
+static int current_account = -1;
+/* Set only when a valid saved user store was found on disk. Until then
+   this is a first boot: no real user exists yet, only the in-memory
+   fallback, so the loader must run first-time setup instead of the
+   normal login screen. */
+static int accounts_saved_store = 0;
+static const CHAR16 nobody[] = {'n', 'o', 'b', 'o', 'd', 'y', 0};
+static void acct_outb(uint16_t port, uint8_t v) { __asm__ volatile ("outb %0, %1" : : "a"(v), "Nd"(port)); }
+static uint8_t acct_inb(uint16_t port) { uint8_t v; __asm__ volatile ("inb %1, %0" : "=a"(v) : "Nd"(port)); return v; }
+static void acct_hex(uint64_t v) {
+    const char *hex = "0123456789ABCDEF";
+    acct_outb(0x3F8, (uint8_t)'0'); acct_outb(0x3F8, (uint8_t)'x');
+    for (int i = 15; i >= 0; i--) { uint32_t tt = 100000; while ((acct_inb(0x3F8 + 5) & 0x20) == 0 && tt-- > 0) { } acct_outb(0x3F8, (uint8_t)hex[(v >> (i * 4)) & 0xF]); }
+    acct_outb(0x3F8, (uint8_t)'\n');
+}
+static void acct_mark(const char *s) {
+    acct_outb(0x3F8 + 1, 0x00); acct_outb(0x3F8 + 3, 0x80); acct_outb(0x3F8 + 0, 0x03); acct_outb(0x3F8 + 1, 0x00); acct_outb(0x3F8 + 3, 0x03); acct_outb(0x3F8 + 2, 0xC7); acct_outb(0x3F8 + 4, 0x0B);
+    while (s && *s) { uint32_t t = 100000; while ((acct_inb(0x3F8 + 5) & 0x20) == 0 && t-- > 0) { } acct_outb(0x3F8, (uint8_t)*s); s++; }
+    acct_outb(0x3F8, (uint8_t)'\n');
+}
+
 /* --- PATCH: safer accounts_open() --- */
 static int accounts_open(EFI_FILE_PROTOCOL **file, UINT64 mode)
 {
@@ -5,21 +49,27 @@ static int accounts_open(EFI_FILE_PROTOCOL **file, UINT64 mode)
     EFI_FILE_PROTOCOL *root = 0;
     EFI_STATUS status;
 
-    if (!gBS || !gBS->LocateProtocol)
+    if (!file || !gBS || !gBS->LocateProtocol)
         return 0;
 
+    acct_mark("ACCT_LOCATE_CALL");
     status = gBS->LocateProtocol(&EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID, 0, (void **)&fs);
+    acct_mark("ACCT_LOCATE_RET");
     if (EFI_ERROR(status) || !fs)
         return 0;
 
+    acct_mark("ACCT_VOLUME_CALL");
     status = fs->OpenVolume(fs, &root);
+    acct_mark("ACCT_VOLUME_RET");
     if (EFI_ERROR(status) || !root)
         return 0;
 
-    /* PATCH: use a static filename to avoid temp array lifetime issues */
+    /* Use a static filename to avoid temp array lifetime issues */
     static const CHAR16 filename[] = L"\\fisix_users.db";
 
+    acct_mark("ACCT_ROOT_PTR"); acct_hex((uint64_t)root); acct_mark("ACCT_OPEN_PTR"); acct_hex(root ? *(uint64_t *)root : 0); acct_mark("ACCT_FILE_OPEN_CALL");
     status = root->Open(root, file, filename, mode, 0);
+    acct_mark("ACCT_FILE_OPEN_RET");
     root->Close(root);
 
     return (!EFI_ERROR(status) && *file);
@@ -38,16 +88,23 @@ static int accounts_save(void)
     store.magic = ACCOUNT_STORE_MAGIC;
     store.count = (uint32_t)account_count;
 
-    /* PATCH: zero unused entries to avoid garbage writes */
+    /* Zero unused entries to avoid garbage writes */
     for (int i = 0; i < FISIX_MAX_USERS; ++i) {
         store.entries[i] = accounts[i];
     }
+    for (int i = account_count; i < FISIX_MAX_USERS; ++i) {
+        store.entries[i].name[0] = 0;
+        store.entries[i].password[0] = 0;
+        store.entries[i].admin = 0;
+    }
 
-    /* PATCH: truncate file before writing */
-    if (file->SetPosition)
-        file->SetPosition(file, 0);
+    /* Rewind before writing; the store size is fixed, so this overwrites it. */
+    if (file->SetPosition && EFI_ERROR(file->SetPosition(file, 0))) {
+        file->Close(file);
+        return 0;
+    }
 
-    if (file->Write(file, &bytes, &store) || bytes != sizeof(store)) {
+    if (EFI_ERROR(file->Write(file, &bytes, &store)) || bytes != sizeof(store)) {
         file->Close(file);
         return 0;
     }
@@ -69,23 +126,153 @@ static void accounts_load(void)
     if (!accounts_open(&file, EFI_FILE_MODE_READ))
         return;
 
-    /* PATCH: ensure full read */
+    /* Ensure full read */
     if (!EFI_ERROR(file->Read(file, &bytes, &store)) &&
         bytes == sizeof(store) &&
         store.magic == ACCOUNT_STORE_MAGIC &&
         store.count > 0 &&
         store.count <= FISIX_MAX_USERS)
     {
+        accounts_saved_store = 1;
         account_count = (int)store.count;
 
-        /* PATCH: copy only valid entries */
+        /* Copy only valid entries */
         for (int i = 0; i < account_count; ++i)
             accounts[i] = store.entries[i];
 
-        /* PATCH: zero unused entries */
-        for (int i = account_count; i < FISIX_MAX_USERS; ++i)
-            accounts[i].name[0] = accounts[i].password[0] = 0;
+        /* Zero unused entries */
+        for (int i = account_count; i < FISIX_MAX_USERS; ++i) {
+            accounts[i].name[0] = 0;
+            accounts[i].password[0] = 0;
+            accounts[i].admin = 0;
+        }
     }
 
     file->Close(file);
+}
+
+static int equal_str(const CHAR16 *a, const CHAR16 *b)
+{
+    if (!a || !b)
+        return 0;
+    while (*a && *b && *a == *b) {
+        ++a;
+        ++b;
+    }
+    return *a == 0 && *b == 0;
+}
+
+static int valid_str(const CHAR16 *s)
+{
+    int n = 0;
+    if (!s)
+        return 0;
+    while (*s) {
+        if (*s == ' ' || ++n > ACCOUNT_TEXT_MAX)
+            return 0;
+        ++s;
+    }
+    return n != 0;
+}
+
+static void copy_str(CHAR16 *to, const CHAR16 *from)
+{
+    int i = 0;
+    if (!to || !from)
+        return;
+    while (from[i] && i < ACCOUNT_TEXT_MAX) {
+        to[i] = from[i];
+        ++i;
+    }
+    to[i] = 0;
+}
+
+int accounts_first_boot(void)
+{
+    return !accounts_saved_store;
+}
+
+/* First-time setup only: replace the in-memory fallback account with the
+   user's own admin account and save it. This deliberately does NOT
+   require an existing admin login (there is none yet on a first boot),
+   unlike accounts_add(). Refuses to run once a saved store exists, so
+   setup can never overwrite an existing user on a later boot. */
+int accounts_setup_first_user(const CHAR16 *name, const CHAR16 *password)
+{
+    if (accounts_saved_store || !valid_str(name) || !valid_str(password))
+        return 0;
+    copy_str(accounts[0].name, name);
+    copy_str(accounts[0].password, password);
+    accounts[0].admin = 1;
+    account_count = 1;
+    current_account = -1;
+    if (!accounts_save())
+        return 0;
+    accounts_saved_store = 1;
+    return 1;
+}
+
+void accounts_init(void)
+{
+    account_count = 1;
+    accounts_saved_store = 0;
+    current_account = -1;
+    copy_str(accounts[0].name, (const CHAR16[]){'a', 'd', 'm', 'i', 'n', 0});
+    copy_str(accounts[0].password, (const CHAR16[]){'f', 'i', 's', 'i', 'x', 0});
+    accounts[0].admin = 1;
+    accounts_load();
+}
+
+int accounts_login(const CHAR16 *name, const CHAR16 *password)
+{
+    for (int i = 0; i < account_count; ++i) {
+        if (equal_str(accounts[i].name, name) && equal_str(accounts[i].password, password)) {
+            current_account = i;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int accounts_add(const CHAR16 *name, const CHAR16 *password)
+{
+    if (!accounts_is_admin() || !valid_str(name) || !valid_str(password) || account_count >= FISIX_MAX_USERS)
+        return 0;
+    for (int i = 0; i < account_count; ++i) {
+        if (equal_str(accounts[i].name, name))
+            return 0;
+    }
+    copy_str(accounts[account_count].name, name);
+    copy_str(accounts[account_count].password, password);
+    accounts[account_count].admin = 0;
+    account_count++;
+    return accounts_save();
+}
+
+int accounts_change_password(const CHAR16 *old_password, const CHAR16 *new_password)
+{
+    if (current_account < 0 || !equal_str(accounts[current_account].password, old_password) || !valid_str(new_password))
+        return 0;
+    copy_str(accounts[current_account].password, new_password);
+    return accounts_save();
+}
+
+int accounts_is_admin(void)
+{
+    return current_account >= 0 && accounts[current_account].admin;
+}
+
+const CHAR16 *accounts_current_user(void)
+{
+    return current_account >= 0 ? accounts[current_account].name : nobody;
+}
+
+int accounts_count(void)
+{
+    return account_count;
+}
+
+const CHAR16 *accounts_user_at(int index)
+{
+    return index >= 0 && index < account_count ? accounts[index].name : 0;
 }

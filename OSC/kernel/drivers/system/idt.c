@@ -25,6 +25,9 @@ extern void irq15(void);
 
 void idt_set_gate(int vec, uint64_t handler, uint16_t selector, uint8_t flags)
 {
+    if (vec < 0 || vec >= IDT_ENTRIES) {
+        return;
+    }
     idt[vec].offset_low = handler & 0xFFFF;
     idt[vec].offset_mid = (handler >> 16) & 0xFFFF;
     idt[vec].offset_high = (handler >> 32) & 0xFFFFFFFF;
@@ -37,6 +40,16 @@ void idt_set_gate(int vec, uint64_t handler, uint16_t selector, uint8_t flags)
 
 void idt_init(void)
 {
+    /* Zero every gate first, so unused vectors are null, not stale. */
+    for (int i = 0; i < IDT_ENTRIES; i++) {
+        idt[i].offset_low = 0;
+        idt[i].selector = 0;
+        idt[i].ist = 0;
+        idt[i].type_attr = 0;
+        idt[i].offset_mid = 0;
+        idt[i].offset_high = 0;
+        idt[i].zero = 0;
+    }
     /* Initialize the IDT structure */
     idtp.limit = (sizeof(struct idt_entry64) * IDT_ENTRIES) - 1;
     idtp.base = (uint64_t)&idt[0];

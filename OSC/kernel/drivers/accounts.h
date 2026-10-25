@@ -6,6 +6,8 @@
 #define FISIX_MAX_USERS 8
 
 void accounts_init(void);
+int accounts_first_boot(void);
+int accounts_setup_first_user(const CHAR16 *name, const CHAR16 *password);
 int accounts_login(const CHAR16 *name, const CHAR16 *password);
 int accounts_add(const CHAR16 *name, const CHAR16 *password);
 int accounts_change_password(const CHAR16 *old_password, const CHAR16 *new_password);

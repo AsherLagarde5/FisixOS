@@ -1,2 +1,11 @@
-OSC/iso/esp.img
-/OSC/iso
+# Build outputs -- regenerable, do not commit these again.
+*.o
+*.elf
+OSC/kernel.bin
+OSC/esp.img
+OSC/FisixOS.iso
+OSC/OVMF_VARS.fd
+OSC/EFI/
+OSC/iso/
+OSC/.vs/
+OSC/startup.nsh
