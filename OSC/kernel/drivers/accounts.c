@@ -88,8 +88,9 @@ static int accounts_save(void)
     store.magic = ACCOUNT_STORE_MAGIC;
     store.count = (uint32_t)account_count;
 
-    /* Zero unused entries to avoid garbage writes */
-    for (int i = 0; i < FISIX_MAX_USERS; ++i) {
+    /* Copy only the live accounts, then zero unused entries so no
+       stale account data is ever written to disk. */
+    for (int i = 0; i < account_count; ++i) {
         store.entries[i] = accounts[i];
     }
     for (int i = account_count; i < FISIX_MAX_USERS; ++i) {
