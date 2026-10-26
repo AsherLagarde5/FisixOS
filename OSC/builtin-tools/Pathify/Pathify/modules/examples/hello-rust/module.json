@@ -1,0 +1,7 @@
+{
+  "name": "hello-rust",
+  "version": "1.0.0",
+  "description": "Example Rust module that echoes its arguments.",
+  "dll": "module.dll",
+  "abi_version": 1
+}

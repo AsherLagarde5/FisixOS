@@ -24,6 +24,15 @@ EFI_OBJ  = boot/efi_main.o
 EFI_ELF  = EFI/BOOT/BOOTX64.elf
 EFI_BIN  = EFI/BOOT/BOOTX64.EFI
 LOADER_OBJS = $(EFI_OBJ) kernel/drivers/eosfs.o kernel/drivers/accounts.o
+# Installed-only copy: same loader source, Installer menu/command
+# compiled out (FISIX_INSTALLED_BUILD=1). The installer writes this
+# file to a target disk as EFI/BOOT/BOOTX64.EFI; it is never a copy
+# of the running installer. The .BIN name keeps it out of the
+# bootloader's *.EFI scan and out of firmware boot search.
+INSTALLED_OBJ = boot/efi_main_installed.o
+INSTALLED_ELF = EFI/BOOT/INSTALLED.elf
+INSTALLED_BIN = EFI/BOOT/INSTAL.BIN
+INSTALLED_LOADER_OBJS = $(INSTALLED_OBJ) kernel/drivers/eosfs.o kernel/drivers/accounts.o
 
 ISO_DIR  = iso
 ISO_IMG  = FisixOS.iso
@@ -52,6 +61,18 @@ $(EFI_BIN): $(LOADER_OBJS)
 $(EFI_OBJ): $(EFI_SRC)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# === Build the installed-only EFI application ===
+$(INSTALLED_BIN): $(INSTALLED_LOADER_OBJS)
+	mkdir -p EFI/BOOT
+	$(CC) -nostdlib -Wl,-T,efi.ld -o $(INSTALLED_ELF) $(INSTALLED_LOADER_OBJS) \
+		-Wl,-shared -Wl,-Bsymbolic -Wl,-znocombreloc
+	$(OBJCOPY) -I elf64-x86-64 -O efi-app-x86_64 --image-base 0x100000 $(INSTALLED_ELF) $(INSTALLED_BIN) || \
+	$(OBJCOPY) --target=efi-app-x86_64 --image-base 0x100000 $(INSTALLED_ELF) $(INSTALLED_BIN)
+	rm -f $(INSTALLED_ELF)
+
+$(INSTALLED_OBJ): $(EFI_SRC)
+	$(CC) $(CFLAGS) -DFISIX_INSTALLED_BUILD=1 -c $< -o $@
+
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -67,13 +88,23 @@ fresh-vars:
 	fi
 
 # === Create a proper ESP image ===
-$(ESP_IMG): $(EFI_BIN) $(KERNEL_BIN)
+$(ESP_IMG): $(EFI_BIN) $(INSTALLED_BIN) $(KERNEL_BIN)
 	dd if=/dev/zero of=$(ESP_IMG) bs=1M count=32 status=none
 	mkfs.fat -F 32 $(ESP_IMG)
 	mmd -i $(ESP_IMG) ::/EFI
 	mmd -i $(ESP_IMG) ::/EFI/BOOT
 	mcopy -i $(ESP_IMG) $(EFI_BIN) ::/EFI/BOOT/BOOTX64.EFI
+	mcopy -i $(ESP_IMG) $(INSTALLED_BIN) ::/EFI/BOOT/INSTAL.BIN
 	mcopy -i $(ESP_IMG) $(KERNEL_BIN) ::/kernel.bin
+	mmd -i $(ESP_IMG) ::/SYSTEM
+	mmd -i $(ESP_IMG) ::/SYSTEM/APPS
+	mmd -i $(ESP_IMG) ::/SYSTEM/DATA
+	mmd -i $(ESP_IMG) ::/SYSTEM/DRIVERS
+	mcopy -i $(ESP_IMG) builtin-tools/compiled/*.fse ::/SYSTEM/APPS/
+	mcopy -i $(ESP_IMG) builtin-tools/compiled/*.fse ::/
+	printf 'SYSTEM/APPS;SYSTEM/DRIVERS' > PATH.TXT
+	mcopy -i $(ESP_IMG) PATH.TXT ::/SYSTEM/PATH.TXT
+	rm -f PATH.TXT
 	echo "\EFI\BOOT\BOOTX64.EFI" > startup.nsh
 	mcopy -i $(ESP_IMG) startup.nsh ::/startup.nsh
 	rm -f startup.nsh
@@ -82,14 +113,26 @@ $(ESP_IMG): $(EFI_BIN) $(KERNEL_BIN)
 iso: $(ESP_IMG)
 	mkdir -p $(ISO_DIR)/EFI/BOOT
 	cp $(EFI_BIN) $(ISO_DIR)/EFI/BOOT/BOOTX64.EFI
+	cp $(INSTALLED_BIN) $(ISO_DIR)/EFI/BOOT/INSTAL.BIN
 	cp $(KERNEL_BIN) $(ISO_DIR)/kernel.bin
-	dd if=/dev/zero of=$(ISO_DIR)/esp.img bs=1M count=2 status=none
+	dd if=/dev/zero of=$(ISO_DIR)/esp.img bs=1M count=4 status=none
 	mkfs.fat -F 12 $(ISO_DIR)/esp.img
 	mmd -i $(ISO_DIR)/esp.img ::/EFI
 	mmd -i $(ISO_DIR)/esp.img ::/EFI/BOOT
 	mcopy -i $(ISO_DIR)/esp.img $(EFI_BIN) ::/EFI/BOOT/BOOTX64.EFI
+	mcopy -i $(ISO_DIR)/esp.img $(INSTALLED_BIN) ::/EFI/BOOT/INSTAL.BIN
 	mcopy -i $(ISO_DIR)/esp.img $(KERNEL_BIN) ::/kernel.bin
+	mmd -i $(ISO_DIR)/esp.img ::/SYSTEM
+	mmd -i $(ISO_DIR)/esp.img ::/SYSTEM/APPS
+	mmd -i $(ISO_DIR)/esp.img ::/SYSTEM/DATA
+	mmd -i $(ISO_DIR)/esp.img ::/SYSTEM/DRIVERS
+	mcopy -i $(ISO_DIR)/esp.img builtin-tools/compiled/*.fse ::/SYSTEM/APPS/
+	mcopy -i $(ISO_DIR)/esp.img builtin-tools/compiled/*.fse ::/
+	printf 'SYSTEM/APPS;SYSTEM/DRIVERS' > $(ISO_DIR)/PATH.TXT
+	mcopy -i $(ISO_DIR)/esp.img $(ISO_DIR)/PATH.TXT ::/SYSTEM/PATH.TXT
+	rm -f $(ISO_DIR)/PATH.TXT
 	echo "\EFI\BOOT\BOOTX64.EFI" > $(ISO_DIR)/startup.nsh
+	mcopy -i $(ISO_DIR)/esp.img $(ISO_DIR)/startup.nsh ::/startup.nsh
 	xorriso -as mkisofs \
 		-V "FISIXOS" \
 		-R -J \
@@ -119,7 +162,7 @@ run-iso: iso fresh-vars
 
 clean:
 	rm -rf EFI $(ISO_DIR) $(ISO_IMG) $(ESP_IMG) OVMF_VARS.fd \
-	       $(KERNEL_OBJS) $(EFI_OBJ) $(EFI_ELF) $(KERNEL_ELF) $(KERNEL_BIN)
+	       $(KERNEL_OBJS) $(EFI_OBJ) $(INSTALLED_OBJ) $(EFI_ELF) $(INSTALLED_ELF) $(KERNEL_ELF) $(KERNEL_BIN)
 
 death:
 	@echo "You have been terminatered."

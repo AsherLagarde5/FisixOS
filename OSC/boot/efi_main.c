@@ -9,6 +9,17 @@ EFI_HANDLE gImageHandle;
 EFI_SYSTEM_TABLE *gST;
 EFI_BOOT_SERVICES *gBS;
 
+/* Installed-only build: the same source, compiled with
+   -DFISIX_INSTALLED_BUILD=1, produces the copy the installer writes
+   to a target disk as EFI/BOOT/BOOTX64.EFI. That copy has no
+   Installer menu entry and no working `install` command, so an
+   installed disk boots as the OS instead of offering to install
+   itself again. The normal (installer-media) build has this as 0.
+   See terminal_install() and boot_run_menu(). */
+#ifndef FISIX_INSTALLED_BUILD
+#define FISIX_INSTALLED_BUILD 0
+#endif
+
 /* Minimal COM1 serial debug, for QEMU: OVMF also logs to COM1, so these
    markers appear in the serial log before any ConOut output. */
 static void serial_outb(uint16_t port, uint8_t v) {
@@ -60,6 +71,19 @@ static int terminal_open_file(const CHAR16 *path, UINT64 mode, UINT64 attributes
    EFI/BOOT/BOOTX64.EFI, kernel.bin and startup.nsh copied from the boot
    drive. It does NOT run on Windows, and the PS1 files are only Windows
    helpers for writing an ISO/IMG, not the installer.
+   Self-copy fix: the target's BOOTX64.EFI is NOT a copy of the running
+   installer loader. The installer media carries a separate, modified
+   copy at EFI/BOOT/INSTAL.BIN (same source, built with
+   -DFISIX_INSTALLED_BUILD=1, Installer menu/command removed), and
+   terminal_install() reads that file and writes it as the target's
+   BOOTX64.EFI. The .BIN extension keeps it out of the bootloader's
+   *.EFI scan and out of firmware's boot search, so it is only ever
+   an install payload, never a boot entry. The name must stay 8.3
+   (INSTAL.BIN, not INSTALLED.BIN): a longer name becomes
+   INSTAL~1.BIN on the FAT ESP and the UEFI file open for the
+   long name fails, aborting the install. If INSTAL.BIN is missing
+   the installer aborts with nothing written, instead of silently
+   copying the running installer onto the target again.
    v1 scope, stated plainly:
    - Whole spare disk only. It erases the picked disk. It does NOT
      preserve Windows partitions, shrink Windows, or dual-boot. That
@@ -231,7 +255,15 @@ static void terminal_install(void)
     uint64_t data_start, fat_start, root_cluster = 2, efi_cluster = 3, bootdir_cluster = 4;
     uint64_t boot_start, kernel_start, startup_start, next_cluster;
     int i;
+#if FISIX_INSTALLED_BUILD
+    /* An installed copy must never install itself again: there is no
+       INSTAL.BIN payload on an installed disk, and copying the
+       running loader would recreate the self-copy bug. */
+    terminal_write_ascii_line("This copy is already installed. The Installer is not available on an installed disk.");
+    return;
+#endif
     terminal_write_ascii_line("FisixOS installer v1 - whole spare disk only.");
+    terminal_write_ascii_line("Installs the installed-only copy (no Installer option on the target), not this running installer.");
     terminal_write_ascii_line("WARNING: the picked disk will be ERASED. Windows partitions are NOT preserved in v1.");
     terminal_write_ascii_line("Do not pick the disk you booted from - it is excluded below, but check the list.");
     if (!gBS) { terminal_write_ascii_line("No boot services."); return; }
@@ -309,11 +341,22 @@ static void terminal_install(void)
         if (gBS->FreePool) gBS->FreePool(handles);
         return;
     }
-    /* Read source files BEFORE writing anything, so a missing file aborts cleanly. */
-    if (!install_read_boot_file((const CHAR16[]){'\\','E','F','I','\\','B','O','O','T','\\','B','O','O','T','X','6','4','.','E','F','I',0}, &boot_file, &boot_len) ||
-        !install_read_boot_file((const CHAR16[]){'\\','k','e','r','n','e','l','.','b','i','n',0}, &kernel_file, &kernel_len) ||
-        !install_read_boot_file((const CHAR16[]){'\\','s','t','a','r','t','u','p','.','n','s','h',0}, &startup_file, &startup_len)) {
-        terminal_write_ascii_line("Could not read BOOTX64.EFI / kernel.bin / startup.nsh from boot drive. Aborted, nothing written.");
+    /* Read source files BEFORE writing anything, so a missing file aborts cleanly.
+       NOTE: boot_file here is the installed-only payload INSTAL.BIN,
+       NOT the running BOOTX64.EFI. It is written to the target as
+       EFI/BOOT/BOOTX64.EFI below, so the target boots as the OS with
+       no Installer option. Copying the running loader would be the
+       old self-copy bug. */
+    if (!install_read_boot_file((const CHAR16[]){'\\','E','F','I','\\','B','O','O','T','\\','I','N','S','T','A','L','.','B','I','N',0}, &boot_file, &boot_len)) {
+        terminal_write_ascii_line("Could not read INSTAL.BIN from boot drive. Aborted, nothing written.");
+        goto cleanup;
+    }
+    if (!install_read_boot_file((const CHAR16[]){'\\','k','e','r','n','e','l','.','b','i','n',0}, &kernel_file, &kernel_len)) {
+        terminal_write_ascii_line("Could not read kernel.bin from boot drive. Aborted, nothing written.");
+        goto cleanup;
+    }
+    if (!install_read_boot_file((const CHAR16[]){'\\','s','t','a','r','t','u','p','.','n','s','h',0}, &startup_file, &startup_len)) {
+        terminal_write_ascii_line("Could not read startup.nsh from boot drive. Aborted, nothing written.");
         goto cleanup;
     }
     if (EFI_ERROR(gBS->AllocatePool(EfiLoaderData, 512, (void **)&sector)) ||
@@ -1016,6 +1059,7 @@ static int fse_run_file(const CHAR16 *path)
         file->Close(file);
         if (total != hdr.code_size) {
             terminal_write_ascii_line("fse: truncated code.");
+            if (gBS && gBS->FreePages) ((EFI_STATUS (EFIAPI *)(uint64_t, UINTN))gBS->FreePages)(load_addr, (hdr.code_size + 4095) / 4096);
             return 0;
         }
     }
@@ -1023,6 +1067,10 @@ static int fse_run_file(const CHAR16 *path)
     serial_mark("FSE_RUN_START");
     rc = entry(&fse_api);
     serial_mark("FSE_RUN_DONE");
+    /* Free the .fse pages, otherwise a second run in the same
+     * boot fails AllocateAddress at 0x300000 (found while
+     * testing browsy.fse twice in one boot). */
+    if (gBS && gBS->FreePages) ((EFI_STATUS (EFIAPI *)(uint64_t, UINTN))gBS->FreePages)(load_addr, (hdr.code_size + 4095) / 4096);
     terminal_write_ascii("fse exited with code ");
     fse_api_print_u64((uint64_t)(rc < 0 ? 0 : rc));
     terminal_write_ascii_line("");
@@ -1091,7 +1139,11 @@ static int terminal_execute_command(const CHAR16 *command)
     }
 
     if (terminal_match_command(argv[0], (const CHAR16[]){ 'i','n','s','t','a','l','l',0 })) {
+#if FISIX_INSTALLED_BUILD
+        terminal_write_ascii_line("This copy is already installed. The Installer is not available on an installed disk.");
+#else
         terminal_install();
+#endif
         return 0;
     }
 
@@ -1115,7 +1167,7 @@ static int terminal_execute_command(const CHAR16 *command)
             ' ','e','x','i','t',',',' ','s','h','u','t','d','o','w','n',',',' ','r','e','b','o','o','t',',',
             ' ','t','y','p','e',',',' ','s','e','t',',',' ','t','i','m','e',',',' ','d','a','t','e',',',
             ' ','c','d',',',' ','c','o','p','y',',',' ','d','e','l',',',' ','r','e','n',',',' ','m','d',',',' ','r','d',',',
-            ' ','p','a','t','h',',',' ','w','h','o','a','m','i',',',' ','p','w','d',',',' ','s','w','i','t','c','h','l','a','n','g',',',' ','i','n','s','t','a','l','l',',',' ','r','u','n',' ','<','f','i','l','e','.','f','s','e','>',0
+            ' ','p','a','t','h',',',' ','w','h','o','a','m','i',',',' ','p','w','d',',',' ','s','w','i','t','c','h','l','a','n','g',',',' ','i','n','s','t','a','l','l',',',' ','g','u','i',',',' ','r','u','n',' ','<','f','i','l','e','.','f','s','e','>',0
         });
         return 0;
     }
@@ -1214,6 +1266,12 @@ static int terminal_execute_command(const CHAR16 *command)
     if (terminal_match_command(argv[0], (const CHAR16[]){ 'p','a','u','s','e',0 })) {
         terminal_write_line((const CHAR16[]){ 'p','r','e','s','s',' ','a','n','y',' ','k','e','y',' ','t','o',' ','c','o','n','t','i','n','u','e',0 });
         return 0;
+    }
+
+    if (terminal_match_command(argv[0], (const CHAR16[]){ 'g','u','i',0 })) {
+        terminal_write_line((const CHAR16[]){ 'S','t','a','r','t','i','n','g',' ','t','h','e',' ','F','i','s','i','x','O','S',' ','G','U','I','.','.','.',0 });
+        serial_mark("GUI_CMD");
+        return 1;
     }
 
     if (terminal_match_command(argv[0], (const CHAR16[]){ 'e','x','i','t',0 }) || terminal_match_command(argv[0], (const CHAR16[]){ 's','h','u','t','d','o','w','n',0 })) {
@@ -1805,10 +1863,13 @@ static EFI_STATUS efi_leave_boot_services(kernel_boot_info_t *boot_info)
      Boot <other .EFI>    (any other EFI file found, chainloaded)
      0 = FisixOS terminal (old normal boot)
    Blank Enter = first Installed disk if one exists, else normal boot.
-   Installer reuses terminal_install(), which already copies
-   BOOTX64.EFI + kernel.bin + startup.nsh from the boot drive to a
-   fresh GPT+FAT32 ESP on the picked disk. The menu just makes that
-   a first-class boot choice instead of a hidden terminal command.
+   Installer reuses terminal_install(), which copies the installed-only
+   payload INSTAL.BIN (as BOOTX64.EFI) + kernel.bin + startup.nsh
+   from the boot drive to a fresh GPT+FAT32 ESP on the picked disk.
+   The menu just makes that a first-class boot choice instead of a
+   hidden terminal command. On an installed-only build
+   (FISIX_INSTALLED_BUILD=1) the Installer entry is compiled out
+   entirely, so an installed disk never offers to install itself.
    Liveboot sets fisix_live_boot, so accounts_save() and the setup
    record become RAM-only (see accounts.c / terminal_save_setup_record).
    Installed sets fisix_selected_fs, so accounts, setup, the shell
@@ -2075,9 +2136,16 @@ static int boot_run_menu(void)
             live_num = n++;
             install_write_num("", (uint64_t)live_num, "");
             terminal_write_ascii_line("FisixOS - Liveboot (everything in RAM, nothing saved)");
+#if FISIX_INSTALLED_BUILD
+            /* Installed disk: no Installer entry at all. `n` is not
+               advanced, so "other" EFI entries shift up by one and
+               the other_idx calculation below must match. */
+            install_num = -1;
+#else
             install_num = n++;
             install_write_num("", (uint64_t)install_num, "");
             terminal_write_ascii_line("FisixOS - Installer (copy this FisixOS to a disk)");
+#endif
             for (i = 0; i < other_count; i++) {
                 install_write_num("", (uint64_t)n, "");
                 terminal_write_ascii("Boot ");
@@ -2088,7 +2156,9 @@ static int boot_run_menu(void)
                 n++;
             }
             terminal_write_ascii_line("  0) FisixOS terminal (normal boot)");
+#if !FISIX_INSTALLED_BUILD
             if (installed_count == 0) terminal_write_ascii_line("  (No installed FisixOS disk found yet - use Installer, then reboot.)");
+#endif
         }
         terminal_write_ascii_line("");
         terminal_write_ascii("Choice (Enter = Installed, else normal): ");
@@ -2128,7 +2198,7 @@ static int boot_run_menu(void)
             boot_clear_screen();
             return 0;
         }
-        if (choice_num == install_num) {
+        if (install_num > 0 && choice_num == install_num) {
             fisix_selected_fs = (boot_boot_fs >= 0) ? boot_fss[boot_boot_fs].fs : 0;
             fisix_live_boot = 0;
             serial_mark("BOOT_MODE_INSTALLER");
@@ -2139,7 +2209,10 @@ static int boot_run_menu(void)
             continue;
         }
         {
-            int other_idx = choice_num - (installed_count + 3);
+            /* First "other" number: installed + live + installer (if
+               present). On an installed build there is no installer
+               number, so other entries start one lower. */
+            int other_idx = choice_num - (installed_count + 2 + (install_num > 0 ? 1 : 0));
             if (other_idx >= 0 && other_idx < other_count) {
                 boot_chainload(other[other_idx]);
                 terminal_write_ascii_line("Press Enter to return to the bootloader menu.");

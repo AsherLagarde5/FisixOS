@@ -1,0 +1,42 @@
+[package]
+name = "reterm"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[[bin]]
+name = "ReTerm"
+path = "src/main.rs"
+
+[[bin]]
+name = "ReTermCompMaker"
+path = "src/bin/compmaker.rs"
+
+[[bin]]
+name = "Nuke"
+path = "src/bin/nuke.rs"
+
+[[bin]]
+name = "Shellpass"
+path = "src/bin/shellpass.rs"
+
+[[bin]]
+name = "Compall"
+path = "src/bin/compall.rs"
+
+[[bin]]
+name = "ReTermModMaker"
+path = "src/bin/modmaker.rs"
+
+[dependencies]
+aes = "=0.8.4"
+crossterm = "=0.29.0"
+hmac = "=0.12.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "=0.10.9"
+zip = { version = "=0.6.6", default-features = false, features = ["aes-crypto", "deflate"] }
+
+[workspace]
+members = ["tools/compmaker-gui", "tools/modmaker-gui", "tools/modlauncher-gui", "tools/installer"]
+default-members = ["."]

@@ -1,0 +1,12 @@
+[package]
+name = "z-lang"
+version = "0.1.0"
+edition = "2024"
+description = "The Z language compiler & runtime"
+
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.59"
+features = ["Win32_UI_WindowsAndMessaging"]
+
+[dependencies]
+roxmltree = "0.21.1"

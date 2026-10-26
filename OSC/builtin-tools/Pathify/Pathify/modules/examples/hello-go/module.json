@@ -1,0 +1,7 @@
+{
+  "name": "hello-go",
+  "version": "1.0.0",
+  "description": "Example Go module that echoes its arguments.",
+  "dll": "module.dll",
+  "abi_version": 1
+}

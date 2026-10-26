@@ -153,13 +153,21 @@ static void gui_text(int x, int y, const char *s, uint32_t fg, uint32_t bg)
 }
 static int gui_strlen(const char *s) { int n = 0; while (s && s[n]) n++; return n; }
 
-/* App catalog: 52 apps. First 12 are desktop icons, the rest are
- * in ALL APPS. Most are stubs in v2: opening one shows a window
- * saying what it will do, instead of pretending it is finished.
- * Real in v2: TERMINAL, FILES, NANO, CALCULATOR, NOTEPAD,
- * PAINT, JPEG VIEWER, SETTINGS, CLOCK, ALL APPS. */
-static const char *gui_apps[52] = {
+/* App catalog: 57 apps. First 17 are desktop icons: the original
+ * 12, plus the 5 built-in tools Derek asked to port, in the order
+ * he asked for them (Browsy first, then Pathify/ReTerm/Z, then
+ * CliPong). The rest are in ALL APPS.
+ * Most are stubs in v2: opening one shows a window saying what
+ * it will do, instead of pretending it is finished. Real in v2:
+ * TERMINAL, FILES, NANO, CALCULATOR, NOTEPAD, PAINT, JPEG VIEWER,
+ * SETTINGS, CLOCK, ALL APPS. The 5 tools also exist as real
+ * .fse programs in OSC/builtin-tools/compiled/ (run them from
+ * the loader terminal); in the kernel GUI they open a window
+ * that names the .fse file, because the GUI cannot run .fse
+ * programs yet. */
+static const char *gui_apps[57] = {
     "TERMINAL","FILES","NANO","CALCULATOR","NOTEPAD","PAINT","JPEG VIEWER","SETTINGS","CLOCK","ALL APPS","BROWSER","MUSIC",
+    "BROWSY","PATHIFY","RETERM","Z","CLIPONG",
     "VIDEO","PHOTOS","MAIL","CHAT","MAPS","STORE","GAMES","CHESS","MINES","SNAKE","TETRIS","WEATHER","NEWS","SPORTS","FINANCE",
     "EDITOR","SPREADSHEET","SLIDES","DRAW","CODE","SHELL","DISKS","NETWORK","BLUETOOTH","WIFI","PRINTER","SCANNER","CAMERA",
     "RECORDER","RADIO","PODCAST","BOOKS","DICTIONARY","TRANSLATE","NOTES","TASKS","CALENDAR","CONTACTS","BACKUP","UPDATE"
@@ -167,6 +175,11 @@ static const char *gui_apps[52] = {
 static const char *gui_app_desc(const char *name)
 {
     if (!gui_strlen(name)) return "";
+    if (name[0]=='B' && name[1]=='R' && name[2]=='O' && name[3]=='W' && name[4]=='S' && name[5]=='Y' && name[6]==0) return "BROWSY - BUILTIN - RUN BROWSY.FSE";
+    if (name[0]=='P' && name[1]=='A' && name[2]=='T') return "PATHIFY - BUILTIN - RUN PATHIFY.FSE";
+    if (name[0]=='R' && name[1]=='E' && name[2]=='T') return "RETERM - BUILTIN - RUN RETERM.FSE";
+    if (name[0]=='Z' && name[1]==0) return "Z - BUILTIN - RUN Z.FSE";
+    if (name[0]=='C' && name[1]=='L' && name[2]=='I' && name[3]=='P') return "CLIPONG - BUILTIN - RUN CLIPONG.FSE";
     if (name[0]=='T' && name[1]=='E') return "GUI TERMINAL - TYPE HELP";
     if (name[0]=='F') return "FILES ON DISK - LIST ONLY";
     if (name[0]=='N' && name[1]=='A') return "NANO - SEE NANO.FSE";
@@ -214,12 +227,12 @@ static void gui_open_generic(const char *title, const char *l0, const char *l1, 
 }
 static void gui_open_app(const char *name)
 {
-    int i; for (i=0;i<52;i++) if (gui_apps[i]==name) break;
+    int i; for (i=0;i<57;i++) if (gui_apps[i]==name) break;
     gui_start_open=0; gui_win_visible=1; gui_input_len=0; gui_input[0]=0;
     if (name[0]=='T' && name[1]=='E') { gui_mode=MODE_TERMINAL; gui_win_title="TERMINAL"; gui_term_lines=0; gui_term_push("FISIX TERMINAL V2"); gui_term_push("TYPE HELP"); return; }
     if (name[0]=='C' && name[1]=='A') { gui_mode=MODE_CALC; gui_win_title="CALCULATOR"; gui_calc_result=0; return; }
     if (name[0]=='N' && name[1]=='O') { gui_mode=MODE_NOTEPAD; gui_win_title="NOTEPAD"; return; }
-    if (name[0]=='P' && name[1]=='A') { gui_mode=MODE_PAINT; gui_win_title="PAINT"; return; }
+    if (name[0]=='P' && name[1]=='A' && name[2]=='I') { gui_mode=MODE_PAINT; gui_win_title="PAINT"; return; }
     if (name[0]=='J') { gui_mode=MODE_JPEG; gui_win_title="JPEG VIEWER"; return; }
     if (name[0]=='A' && name[1]=='L') { gui_mode=MODE_ALLAPPS; gui_win_title="ALL APPS"; gui_allapps_page=0; return; }
     gui_mode=MODE_WINDOW; gui_win_title=name; gui_win_lines[0]=gui_app_desc(name); gui_win_lines[1]="COMING SOON"; gui_win_lines[2]="STUB IN GUI V2"; gui_win_lines[3]=""; gui_win_count=3;
@@ -232,7 +245,7 @@ static void gui_draw_cursor(void)
 static void gui_draw_desktop_icons(void)
 {
     int i;
-    for (i=0;i<12;i++) {
+    for (i=0;i<17;i++) {
         int x = 16 + (i % 4) * 120; int y = 64 + (i / 4) * 110;
         gui_fill(x, y, 64, 64, COL_ICON); gui_border(x, y, 64, 64, COL_BLACK);
         gui_text(x+8, y+24, gui_apps[i][0]==0 ? "?" : (char[2]){gui_apps[i][0],0}, COL_BLACK, COL_ICON);
@@ -298,7 +311,7 @@ static void gui_draw_window_content(void)
         return;
     }
     if (gui_mode==MODE_ALLAPPS) {
-        for (i=0;i<5;i++) { int idx = gui_allapps_page*5+i; if (idx<52) gui_text(wx+24, wy+64+i*36, gui_apps[idx], COL_BLACK, COL_WINDOW); }
+        for (i=0;i<5;i++) { int idx = gui_allapps_page*5+i; if (idx<57) gui_text(wx+24, wy+64+i*36, gui_apps[idx], COL_BLACK, COL_WINDOW); }
         gui_text(wx+24, wy+64+5*36, "NEXT PAGE", COL_BLACK, COL_WINDOW); return;
     }
     if (gui_mode==MODE_TERMINAL || gui_mode==MODE_CALC || gui_mode==MODE_NOTEPAD) {
@@ -369,7 +382,7 @@ static void gui_term_exec(void)
     if (!gui_strlen(gui_input)) return;
     if (gui_input[0]=='H' || gui_input[0]=='h') { gui_term_push("HELP ECHO VER APPS"); }
     else if (gui_input[0]=='V' || gui_input[0]=='v') { gui_term_push("FISIXOS GUI V2"); }
-    else if (gui_input[0]=='A' || gui_input[0]=='a') { gui_term_push("52 APPS IN ALL APPS"); }
+    else if (gui_input[0]=='A' || gui_input[0]=='a') { gui_term_push("57 APPS IN ALL APPS"); }
     else if (gui_input[0]=='E' && gui_input[1]=='C') { gui_term_push(gui_input+5); }
     else if (gui_input[0]=='C' && gui_input[1]=='L') { gui_term_lines=0; }
     else { gui_term_push("UNKNOWN - TRY HELP"); }
@@ -393,11 +406,11 @@ void gui_mouse_click(int left_down)
         gui_draw(); return;
     }
     /* Desktop icons */
-    { int i; for (i=0;i<12;i++) { int x=16+(i%4)*120; int y=64+(i/4)*110; if (gui_inside(gui_mx,gui_my,x,y,64,64)) { gui_open_app(gui_apps[i]); gui_draw(); return; } } }
+    { int i; for (i=0;i<17;i++) { int x=16+(i%4)*120; int y=64+(i/4)*110; if (gui_inside(gui_mx,gui_my,x,y,64,64)) { gui_open_app(gui_apps[i]); gui_draw(); return; } } }
     wx=160; wy=80; ww=640;
     if (gui_win_visible && gui_inside(gui_mx,gui_my,wx+ww-36,wy+8,24,24)) { gui_win_visible=0; gui_serial("[FisixOS] GUI_CLICK_CLOSE\n"); gui_draw(); return; }
-    if (gui_win_visible && gui_mode==MODE_ALLAPPS && gui_inside(gui_mx,gui_my,wx+24,wy+64+5*36,200,32)) { gui_allapps_page++; if (gui_allapps_page*5>=52) gui_allapps_page=0; gui_draw(); return; }
-    if (gui_win_visible && gui_mode==MODE_ALLAPPS) { int i; for (i=0;i<5;i++) { int idx=gui_allapps_page*5+i; if (idx<52 && gui_inside(gui_mx,gui_my,wx+24,wy+64+i*36,300,32)) { gui_open_app(gui_apps[idx]); gui_draw(); return; } } }
+    if (gui_win_visible && gui_mode==MODE_ALLAPPS && gui_inside(gui_mx,gui_my,wx+24,wy+64+5*36,200,32)) { gui_allapps_page++; if (gui_allapps_page*5>=57) gui_allapps_page=0; gui_draw(); return; }
+    if (gui_win_visible && gui_mode==MODE_ALLAPPS) { int i; for (i=0;i<5;i++) { int idx=gui_allapps_page*5+i; if (idx<57 && gui_inside(gui_mx,gui_my,wx+24,wy+64+i*36,300,32)) { gui_open_app(gui_apps[idx]); gui_draw(); return; } } }
     gui_draw();
 }
 static int gui_mouse_write(uint8_t cmd)

@@ -1,0 +1,18 @@
+[package]
+name = "dosify"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dosify"
+path = "main.rs"
+
+[dependencies]
+colored = "=2.1.0"
+ctrlc = "=3.4.5"
+dirs = "=5.0.1"
+regex = "=1.11.1"
+rustyline = "=14.0.0"
+which = "=6.0.3"
+
+[workspace]
