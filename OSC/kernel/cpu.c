@@ -66,6 +66,22 @@ int cpu_get_info(cpu_info_t *info)
     g_cpu_info.stepping = stepping;
     g_cpu_info.features_ecx = ecx;
     g_cpu_info.features_edx = edx;
+    /* Brand string, CPUID 0x80000002-0x80000004, 48 bytes + NUL.
+       This is what actually says "11th Gen Intel(R) Core(TM) i5-1145G7",
+       rather than just family/model numbers. Only if the CPU reports it. */
+    {
+        uint32_t max_ext, a, b, c, d;
+        cpuid(0x80000000, &max_ext, &b, &c, &d);
+        if (max_ext >= 0x80000004) {
+            uint32_t *out = (uint32_t *)g_cpu_info.brand;
+            cpuid(0x80000002, &a, &b, &c, &d); out[0]=a; out[1]=b; out[2]=c; out[3]=d;
+            cpuid(0x80000003, &a, &b, &c, &d); out[4]=a; out[5]=b; out[6]=c; out[7]=d;
+            cpuid(0x80000004, &a, &b, &c, &d); out[8]=a; out[9]=b; out[10]=c; out[11]=d;
+            g_cpu_info.brand[48] = 0;
+        } else {
+            g_cpu_info.brand[0] = 0;
+        }
+    }
 
     *info = g_cpu_info;
     return 1;
@@ -85,4 +101,16 @@ void cpu_init(void)
     if (info.vendor == CPU_VENDOR_INTEL) {
         /* Intel vendor-specific setup hooks can be added here later. */
     }
+}
+
+int cpu_is_tiger_lake(void)
+{
+    /* Tiger Lake (11th Gen, including i5-1145G7): Intel, family 6, model 140 (0x8C).
+       i5-1145G7 is a Tiger Lake-UP3 part: 4 cores, 8 threads, Iris Xe GT2. */
+    return g_cpu_info.vendor == CPU_VENDOR_INTEL && g_cpu_info.family == 6 && g_cpu_info.model == 140;
+}
+
+const char *cpu_brand(void)
+{
+    return g_cpu_info.brand;
 }

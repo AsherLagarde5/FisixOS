@@ -1,0 +1,29 @@
+#!/bin/sh
+# fisix-gcc - GCC cross-target for FisixOS .fse programs.
+# This is the GCC port, stage 1: GCC running on Linux/Windows
+# (host) producing FisixOS executables. GCC running ON FisixOS
+# (stage 2) needs a kernel syscall ABI + libc + process loader,
+# see tools/PORTING-GCC-RUST.md - it is not claimed here.
+# Usage: tools/fisix-gcc apps/hello.c -o hello.fse
+#        tools/fisix-gcc apps/nano.c -o nano.fse
+set -e
+OUT=""
+SRC=""
+for a in "$@"; do
+  case "$a" in
+    -o) OUT="next";;
+    *) if [ "$OUT" = "next" ]; then OUT="$a"; else SRC="$a"; fi;;
+  esac
+done
+if [ -z "$SRC" ] || [ -z "$OUT" ] || [ "$OUT" = "next" ]; then
+  echo "usage: fisix-gcc <source.c> -o <output.fse>" >&2
+  exit 2
+fi
+DIR=$(dirname "$0")
+ELF="${OUT}.elf"
+x86_64-linux-gnu-gcc -ffreestanding -nostdlib -fno-stack-protector \
+  -fno-pic -fno-pie -no-pie -m64 -O2 -Wall \
+  -I"$(dirname "$DIR")/boot" \
+  -Wl,-T,"$DIR/fse.ld" -o "$ELF" "$SRC"
+python3 "$DIR/make_fse.py" "$ELF" "$OUT"
+rm -f "$ELF"

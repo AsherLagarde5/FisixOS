@@ -93,6 +93,16 @@ struct EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
 struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
     void *Reset;
     EFI_STATUS (EFIAPI *OutputString)(void *This, const CHAR16 *String);
+    /* Real UEFI order after OutputString. The old header stopped here,
+       so ClearScreen/SetAttribute could not be called at all. Adding
+       these fields after OutputString does not move OutputString. */
+    void *QueryMode;
+    void *SetMode;
+    EFI_STATUS (EFIAPI *SetAttribute)(void *This, UINTN Attribute);
+    EFI_STATUS (EFIAPI *ClearScreen)(void *This);
+    void *SetCursorPosition;
+    void *EnableCursor;
+    void *Mode;
 };
 
 typedef struct {
@@ -145,6 +155,86 @@ typedef struct {
     UINT64 Revision;
     EFI_STATUS (EFIAPI *OpenVolume)(void *This, EFI_FILE_PROTOCOL **Root);
 } EFI_SIMPLE_FILE_SYSTEM_PROTOCOL;
+
+#define EFI_BLOCK_IO_PROTOCOL_GUID \
+    (EFI_GUID){ 0x964e5b21, 0x6459, 0x11d2, { 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b } }
+
+#define EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID \
+    (EFI_GUID){ 0x9042a9de, 0x23dc, 0x4a38, { 0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a } }
+
+#define EFI_SMBIOS_TABLE_GUID \
+    (EFI_GUID){ 0xeb9d2d31, 0x2d88, 0x11d3, { 0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d } }
+
+#define EFI_LOADED_IMAGE_PROTOCOL_GUID \
+    (EFI_GUID){ 0x5b1b31a1, 0x9562, 0x11d2, { 0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b } }
+
+typedef struct {
+    UINT32 MediaId;
+    BOOLEAN RemovableMedia;
+    BOOLEAN MediaPresent;
+    BOOLEAN LogicalPartition;
+    BOOLEAN ReadOnly;
+    BOOLEAN WriteCaching;
+    UINT32 BlockSize;
+    UINT32 IoAlign;
+    UINT64 LastBlock;
+    UINT64 LowestAlignedLba;
+    UINT32 LogicalBlocksPerPhysicalBlock;
+    UINT32 OptimalTransferLengthGranularity;
+} EFI_BLOCK_IO_MEDIA;
+
+typedef struct EFI_BLOCK_IO_PROTOCOL EFI_BLOCK_IO_PROTOCOL;
+struct EFI_BLOCK_IO_PROTOCOL {
+    UINT64 Revision;
+    EFI_BLOCK_IO_MEDIA *Media;
+    EFI_STATUS (EFIAPI *Reset)(EFI_BLOCK_IO_PROTOCOL *This, BOOLEAN ExtendedVerification);
+    EFI_STATUS (EFIAPI *ReadBlocks)(EFI_BLOCK_IO_PROTOCOL *This, UINT32 MediaId, UINT64 Lba, UINTN BufferSize, void *Buffer);
+    EFI_STATUS (EFIAPI *WriteBlocks)(EFI_BLOCK_IO_PROTOCOL *This, UINT32 MediaId, UINT64 Lba, UINTN BufferSize, const void *Buffer);
+    EFI_STATUS (EFIAPI *FlushBlocks)(EFI_BLOCK_IO_PROTOCOL *This);
+};
+
+typedef struct {
+    UINT32 Revision;
+    EFI_HANDLE ParentHandle;
+    void *SystemTable;
+    EFI_HANDLE DeviceHandle;
+    void *FilePath;
+    void *Reserved;
+    UINT32 LoadOptionsSize;
+    void *LoadOptions;
+    void *ImageBase;
+    UINT64 ImageSize;
+    UINT32 ImageCodeType;
+    UINT32 ImageDataType;
+    EFI_STATUS (EFIAPI *Unload)(EFI_HANDLE ImageHandle);
+} EFI_LOADED_IMAGE_PROTOCOL;
+
+typedef struct {
+    UINT32 Version;
+    UINT32 HorizontalResolution;
+    UINT32 VerticalResolution;
+    UINT32 PixelFormat;
+    UINT32 PixelInformation[4]; /* EFI_PIXEL_BITMASK: Red, Green, Blue, Reserved */
+    UINT32 PixelsPerScanLine;
+} EFI_GRAPHICS_OUTPUT_MODE_INFORMATION;
+
+typedef struct {
+    UINT32 MaxMode;
+    UINT32 Mode;
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *Info;
+    UINT64 SizeOfInfo;
+    UINT64 FrameBufferBase;
+    UINT64 FrameBufferSize;
+} EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE;
+
+typedef struct {
+    EFI_STATUS (EFIAPI *QueryMode)(void *This, UINT32 ModeNumber, UINT64 *SizeOfInfo, EFI_GRAPHICS_OUTPUT_MODE_INFORMATION **Info);
+    EFI_STATUS (EFIAPI *SetMode)(void *This, UINT32 ModeNumber);
+    EFI_STATUS (EFIAPI *Blt)(void *This, void *BltBuffer, UINT32 BltOperation, UINT64 SourceX, UINT64 SourceY, UINT64 DestinationX, UINT64 DestinationY, UINT64 Width, UINT64 Height, UINT64 Delta);
+    EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *Mode;
+} EFI_GRAPHICS_OUTPUT_PROTOCOL;
+
+
 
 struct EFI_FILE_PROTOCOL {
     /* UEFI 13.5.1: the first field is Revision, not Open. Omitting it
@@ -276,5 +366,10 @@ enum { AllocateAnyPages, AllocateMaxAddress, AllocateAddress };
 extern EFI_HANDLE gImageHandle;
 extern EFI_SYSTEM_TABLE *gST;
 extern EFI_BOOT_SERVICES *gBS;
+/* Bootloader selection, shared with accounts/eosfs so a menu choice
+   actually changes which disk the login, setup and kernel load use.
+   NULL = first SimpleFileSystem found (old behaviour). */
+extern EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fisix_selected_fs;
+extern int fisix_live_boot;
 
 #endif

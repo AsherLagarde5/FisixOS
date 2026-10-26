@@ -21,9 +21,13 @@ static int eosfs_read_disk_entries(const CHAR16 *path, eosfs_entry_t *entries, i
         return 0;
     }
 
-    status = gBS->LocateProtocol(&EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID, 0, (void **)&fs);
-    if (EFI_ERROR(status) || fs == 0) {
-        return 0;
+    if (fisix_selected_fs) {
+        fs = fisix_selected_fs;
+    } else {
+        status = gBS->LocateProtocol(&EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID, 0, (void **)&fs);
+        if (EFI_ERROR(status) || fs == 0) {
+            return 0;
+        }
     }
 
     status = fs->OpenVolume(fs, &root);

@@ -109,3 +109,89 @@ int pci_is_intel_gpu_present(void)
 
     return 0;
 }
+
+int pci_find_device_class(uint8_t class_code, pci_device_t *out)
+{
+    uint16_t bus;
+    uint8_t device;
+    uint8_t function;
+    if (out == 0) return 0;
+    for (bus = 0; bus < 256u; ++bus) {
+        for (device = 0; device < 32u; ++device) {
+            int multifunction = 0;
+            for (function = 0; function < 8u; ++function) {
+                uint16_t vendor_id;
+                uint8_t header_type;
+                if (function > 0 && !multifunction) break;
+                vendor_id = pci_read_config16(bus, device, function, 0x00u);
+                if (vendor_id == 0xFFFFu) {
+                    if (function == 0) break;
+                    continue;
+                }
+                header_type = pci_read_config8(bus, device, function, 0x0Eu);
+                if (function == 0) multifunction = (header_type & 0x80u) != 0;
+                else if (!multifunction) break;
+                if (pci_read_config8(bus, device, function, 0x0Bu) == class_code) {
+                    out->bus = bus; out->device = device; out->function = function;
+                    out->vendor_id = vendor_id;
+                    out->device_id = pci_read_config16(bus, device, function, 0x02u);
+                    out->class_code = class_code;
+                    out->subclass = pci_read_config8(bus, device, function, 0x0Au);
+                    out->prog_if = pci_read_config8(bus, device, function, 0x09u);
+                    out->header_type = header_type;
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+uint32_t pci_read_bar(pci_device_t *dev, int index)
+{
+    if (!dev || index < 0 || index > 5) return 0;
+    return pci_read_config32(dev->bus, dev->device, dev->function, 0x10u + (uint8_t)(index * 4));
+}
+
+uint64_t pci_read_bar64(pci_device_t *dev, int index)
+{
+    uint32_t lo, hi;
+    if (!dev || index < 0 || index > 4) return 0;
+    lo = pci_read_config32(dev->bus, dev->device, dev->function, 0x10u + (uint8_t)(index * 4));
+    if ((lo & 0x6u) != 0x4u) return lo & 0xFFFFFFF0u;
+    hi = pci_read_config32(dev->bus, dev->device, dev->function, 0x10u + (uint8_t)((index + 1) * 4));
+    return ((uint64_t)hi << 32) | (lo & 0xFFFFFFF0u);
+}
+
+int pci_scan_all(pci_device_t *out, int max, int *count)
+{
+    uint16_t bus; uint8_t device, function; int n = 0;
+    if (count) *count = 0;
+    if (!out || max <= 0) return 0;
+    for (bus = 0; bus < 256u; ++bus) {
+        for (device = 0; device < 32u; ++device) {
+            int multifunction = 0;
+            for (function = 0; function < 8u; ++function) {
+                uint16_t vendor_id; uint8_t header_type;
+                if (function > 0 && !multifunction) break;
+                vendor_id = pci_read_config16(bus, device, function, 0x00u);
+                if (vendor_id == 0xFFFFu) { if (function == 0) break; continue; }
+                header_type = pci_read_config8(bus, device, function, 0x0Eu);
+                if (function == 0) multifunction = (header_type & 0x80u) != 0;
+                else if (!multifunction) break;
+                if (n < max) {
+                    out[n].bus = bus; out[n].device = device; out[n].function = function;
+                    out[n].vendor_id = vendor_id;
+                    out[n].device_id = pci_read_config16(bus, device, function, 0x02u);
+                    out[n].class_code = pci_read_config8(bus, device, function, 0x0Bu);
+                    out[n].subclass = pci_read_config8(bus, device, function, 0x0Au);
+                    out[n].prog_if = pci_read_config8(bus, device, function, 0x09u);
+                    out[n].header_type = header_type;
+                }
+                n++;
+            }
+        }
+    }
+    if (count) *count = n;
+    return n > 0;
+}

@@ -27,6 +27,9 @@ static int current_account = -1;
    fallback, so the loader must run first-time setup instead of the
    normal login screen. */
 static int accounts_saved_store = 0;
+/* Set by the bootloader menu in efi_main.c. NULL = first FS found. */
+EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fisix_selected_fs = 0;
+int fisix_live_boot = 0;
 static const CHAR16 nobody[] = {'n', 'o', 'b', 'o', 'd', 'y', 0};
 static void acct_outb(uint16_t port, uint8_t v) { __asm__ volatile ("outb %0, %1" : : "a"(v), "Nd"(port)); }
 static uint8_t acct_inb(uint16_t port) { uint8_t v; __asm__ volatile ("inb %1, %0" : "=a"(v) : "Nd"(port)); return v; }
@@ -52,11 +55,15 @@ static int accounts_open(EFI_FILE_PROTOCOL **file, UINT64 mode)
     if (!file || !gBS || !gBS->LocateProtocol)
         return 0;
 
-    acct_mark("ACCT_LOCATE_CALL");
-    status = gBS->LocateProtocol(&EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID, 0, (void **)&fs);
-    acct_mark("ACCT_LOCATE_RET");
-    if (EFI_ERROR(status) || !fs)
-        return 0;
+    if (fisix_selected_fs) {
+        fs = fisix_selected_fs;
+    } else {
+        acct_mark("ACCT_LOCATE_CALL");
+        status = gBS->LocateProtocol(&EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID, 0, (void **)&fs);
+        acct_mark("ACCT_LOCATE_RET");
+        if (EFI_ERROR(status) || !fs)
+            return 0;
+    }
 
     acct_mark("ACCT_VOLUME_CALL");
     status = fs->OpenVolume(fs, &root);
@@ -78,6 +85,10 @@ static int accounts_open(EFI_FILE_PROTOCOL **file, UINT64 mode)
 /* --- PATCH: safer accounts_save() --- */
 static int accounts_save(void)
 {
+    /* Liveboot: everything in RAM. Keep the in-memory account, do not
+       touch any disk, but report success so setup does not loop asking
+       for session-only confirmation. */
+    if (fisix_live_boot) return 1;
     EFI_FILE_PROTOCOL *file = 0;
     account_store_t store;
     UINTN bytes = sizeof(store);

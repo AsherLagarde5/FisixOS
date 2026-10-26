@@ -19,6 +19,7 @@ struct idt_ptr64 {
 } __attribute__((packed));
 
 void idt_init(void);
+uint16_t idt_current_cs(void);
 void idt_set_gate(int vec, uint64_t handler, uint16_t selector, uint8_t flags);
 
 #endif
