@@ -356,6 +356,49 @@ void gui_usb_move(int dx, int dy, int buttons)
     else gui_prev_left = 0;
     gui_draw();
 }
+static int gui_prev_right = 0;
+static int gui_prev_back = 0;
+static int gui_scroll_accum = 0;
+int gui_cursor_x(void) { return gui_mx; }
+int gui_cursor_y(void) { return gui_my; }
+/* Logitech TrackMan Marble (T-BC21, P/N 810-000767) and other
+   Logitech trackballs: a 40 mm ball, 4 buttons, NO scroll wheel,
+   300 DPI. Buttons: bit0 left, bit1 right, bit2 small (back),
+   bit3 small (forward). Because 300 DPI is slow next to a
+   normal mouse, ball deltas are doubled (feels like ~600 DPI).
+   Holding the forward small button turns the ball into a
+   scroll control (Logitech's own Universal Scroll workaround
+   for a wheel-less trackball): Y movement accumulates and
+   steps the ALL APPS page instead of moving the cursor.
+   Right-click edge: close the open window, else toggle START.
+   Back-button edge: close the open window. */
+void gui_trackball_move(int dx, int dy, int buttons)
+{
+    int left = buttons & 1, right = buttons & 2, back = buttons & 4, scroll = buttons & 8;
+    if (scroll) {
+        gui_scroll_accum += dy;
+        if (gui_scroll_accum <= -10) { gui_scroll_accum = 0; if (gui_mode == MODE_ALLAPPS) { gui_allapps_page++; if (gui_allapps_page * 5 >= 57) gui_allapps_page = 0; } gui_serial("[FisixOS] GUI_TRACKBALL_SCROLL\n"); gui_draw(); }
+        else if (gui_scroll_accum >= 10) { gui_scroll_accum = 0; if (gui_mode == MODE_ALLAPPS) { gui_allapps_page--; if (gui_allapps_page < 0) gui_allapps_page = 0; } gui_serial("[FisixOS] GUI_TRACKBALL_SCROLL\n"); gui_draw(); }
+        gui_prev_left = 0; gui_prev_right = 0; gui_prev_back = 0;
+        return;
+    }
+    gui_scroll_accum = 0;
+    gui_mouse_move(dx * 2, dy * 2);
+    if (left) { if (!gui_prev_left) gui_mouse_click(1); }
+    else gui_prev_left = 0;
+    if (right && !gui_prev_right) {
+        if (gui_win_visible) gui_win_visible = 0;
+        else gui_start_open = !gui_start_open;
+        gui_serial("[FisixOS] GUI_TRACKBALL_RIGHT\n"); gui_draw();
+    }
+    gui_prev_right = right ? 1 : 0;
+    if (back && !gui_prev_back) {
+        if (gui_win_visible) gui_win_visible = 0;
+        gui_serial("[FisixOS] GUI_TRACKBALL_BACK\n"); gui_draw();
+    }
+    gui_prev_back = back ? 1 : 0;
+    gui_draw();
+}
 void gui_touch_set(int x, int y, int down)
 {
     if (!gui_ready) return;

@@ -375,6 +375,22 @@ static uint8_t g_int_cycle = 1;
 static int g_int_pending = 0;
 static xhci_hid_t g_hid;
 
+/* Direct Logitech trackball support. The T-BC21 TrackMan Marble
+   (P/N 810-000767, M/N T-BC21, 40 mm ball, 4 buttons, no wheel,
+   300 DPI) is a standard HID mouse on paper, but it must not be
+   misclassified as an absolute tablet (its descriptor / protocol
+   can push the generic classifier that way, and then ball rolls
+   become wild absolute jumps instead of relative movement).
+   Vendor 0x046D is Logitech for all of these. Product IDs from
+   Windows HID listings: 0xC408 = Marble Mouse (4-button, T-BC21),
+   0xC401 = TrackMan Marble Wheel, 0xC403 = TrackMan Marble FX,
+   0xC508 = Cordless Trackball. The Unifying receiver 0xC52B is
+   NOT listed: it is a receiver, not the trackball itself. */
+static int xhci_is_logitech_trackball(uint16_t vendor, uint16_t product)
+{
+    if (vendor != 0x046D) return 0;
+    return product == 0xC408 || product == 0xC401 || product == 0xC403 || product == 0xC508;
+}
 int xhci_hid_init(xhci_hid_t *out)
 {
     uint8_t slot = 0, code = 0;
@@ -463,6 +479,11 @@ int xhci_hid_init(xhci_hid_t *out)
        turn the low byte of X into a wild cursor jump. */
     if (kind == XHCI_HID_MOUSE && (lmax_x > 255 || size_x == 16)) kind = XHCI_HID_TABLET;
     if (kind == XHCI_HID_MOUSE && !lmax_x) lmax_x = 32767;
+    /* Direct trackball override: device descriptor vendor/product
+       are already read (dev+8 / dev+10). A known Logitech
+       trackball is always relative, never absolute, whatever
+       the generic descriptor classifier said. */
+    if (xhci_is_logitech_trackball(rd16(dev + 8), rd16(dev + 10))) kind = XHCI_HID_TRACKBALL;
     /* SET_CONFIGURATION, then Configure Endpoint for the IN endpoint. */
     if (xhci_control(slot, 0x00, 9, cfgval, 0, 0, 0, 0) < 0) return 0;
     for (i = 0; i < sizeof(g_cfg_ctx); i++) g_cfg_ctx[i] = 0;
@@ -529,12 +550,19 @@ int xhci_hid_poll(xhci_hid_report_t *rep)
             uint32_t i;
             if (actual > sizeof(rep->data)) actual = sizeof(rep->data);
             rep->kind = g_hid.kind; rep->len = (uint8_t)actual;
-            rep->dx = 0; rep->dy = 0; rep->buttons = 0; rep->abs_x = 0; rep->abs_y = 0; rep->down = 0;
+            rep->dx = 0; rep->dy = 0; rep->buttons = 0; rep->abs_x = 0; rep->abs_y = 0; rep->down = 0; rep->wheel = 0;
             rep->logical_max_x = g_hid.logical_max_x; rep->logical_max_y = g_hid.logical_max_y;
             for (i = 0; i < actual; i++) rep->data[i] = g_int_buf[i];
-            if (g_hid.kind == XHCI_HID_MOUSE && actual >= 3) {
+            /* A tablet/touch report shorter than 5 bytes has no X/Y in
+               it at all. Returning it as (0,0) would teleport the
+               cursor to the top-left corner - exactly the VirtualBox
+               bug: a short/empty tablet report on hover must not
+               be treated as a position. Treat it as no report. */
+            if ((g_hid.kind == XHCI_HID_TABLET || g_hid.kind == XHCI_HID_TOUCH) && actual < 5) return 0;
+            if ((g_hid.kind == XHCI_HID_MOUSE || g_hid.kind == XHCI_HID_TRACKBALL) && actual >= 3) {
                 rep->buttons = g_int_buf[0]; rep->dx = (int8_t)g_int_buf[1]; rep->dy = (int8_t)g_int_buf[2];
                 rep->down = (g_int_buf[0] & 1) != 0;
+                rep->wheel = actual >= 4 ? (int8_t)g_int_buf[3] : 0;
             } else if ((g_hid.kind == XHCI_HID_TABLET || g_hid.kind == XHCI_HID_TOUCH) && actual >= 5) {
                 uint32_t x = (uint32_t)g_int_buf[1] | ((uint32_t)g_int_buf[2] << 8);
                 uint32_t y = (uint32_t)g_int_buf[3] | ((uint32_t)g_int_buf[4] << 8);

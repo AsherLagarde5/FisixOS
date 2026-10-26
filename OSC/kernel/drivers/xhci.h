@@ -33,6 +33,7 @@ int xhci_enumerate_first(uint8_t *slot_out, uint32_t *portsc_out);
 #define XHCI_HID_KEYBOARD 2
 #define XHCI_HID_TABLET 3
 #define XHCI_HID_TOUCH 4
+#define XHCI_HID_TRACKBALL 5
 typedef struct {
     uint8_t slot;
     uint16_t vendor_id;
@@ -54,6 +55,7 @@ typedef struct {
     int dx;
     int dy;
     int buttons;
+    int wheel;
     int abs_x;
     int abs_y;
     int down;

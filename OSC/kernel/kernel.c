@@ -380,6 +380,7 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
                             debug_print(", mps ");
                             debug_print_u32(hid.max_packet);
                             debug_print("\n");
+                            if (hid.kind == XHCI_HID_TRACKBALL) debug_print("[FisixOS] boot: xHCI HID TRACKBALL (Logitech trackball, direct support)\n");
                             g_hid_ready = 1;
                         } else {
                             debug_print("[FisixOS] boot: xHCI HID init failed (not a HID device, or endpoint config failed)\n");
@@ -433,15 +434,31 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
                     xhci_hid_report_t rep;
                     int r = xhci_hid_poll(&rep);
                     if (r > 0) {
-                        if (rep.kind == XHCI_HID_MOUSE) {
+                        if (rep.kind == XHCI_HID_TRACKBALL) {
+                            gui_trackball_move(rep.dx, rep.dy, rep.buttons);
+                        } else if (rep.kind == XHCI_HID_MOUSE) {
                             gui_usb_move(rep.dx, rep.dy, rep.buttons);
                         } else if (rep.kind == XHCI_HID_TABLET || rep.kind == XHCI_HID_TOUCH) {
-                            uint32_t mx = rep.logical_max_x ? rep.logical_max_x : 32767;
-                            uint32_t my = rep.logical_max_y ? rep.logical_max_y : 32767;
-                            int sx = (int)((uint32_t)rep.abs_x * gui_width() / mx);
-                            int sy = (int)((uint32_t)rep.abs_y * gui_height() / my);
-                            touchscreen_update_absolute(sx, sy, rep.down);
-                            gui_touch_set(sx, sy, rep.down);
+                            /* rep.len < 5 means no X/Y (see xhci poll).
+                               Also ignore a single (0,0) absolute report:
+                               VirtualBox tablets can send one on hover/
+                               window-enter, and applying it snaps the
+                               cursor to the top-left corner. A real move
+                               to the top-left sends (0,0) repeatedly,
+                               so the second consecutive one is applied. */
+                            static int tablet_zero_seen = 0;
+                            if (rep.len >= 5) {
+                                uint32_t mx = rep.logical_max_x ? rep.logical_max_x : 32767;
+                                uint32_t my = rep.logical_max_y ? rep.logical_max_y : 32767;
+                                int sx = (int)((uint32_t)rep.abs_x * gui_width() / mx);
+                                int sy = (int)((uint32_t)rep.abs_y * gui_height() / my);
+                                if (sx == 0 && sy == 0 && !rep.down && !tablet_zero_seen) { tablet_zero_seen = 1; }
+                                else {
+                                    tablet_zero_seen = 0;
+                                    touchscreen_update_absolute(sx, sy, rep.down);
+                                    gui_touch_set(sx, sy, rep.down);
+                                }
+                            }
                         }
                     }
                 }
