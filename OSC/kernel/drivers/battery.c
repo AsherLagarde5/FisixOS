@@ -13,5 +13,10 @@ void battery_init(void)
 
 battery_status_t battery_get_status(void)
 {
-    return battery_state;
+    battery_status_t status = battery_state;
+    /* Percent is defined 0-100; clamp anything a future firmware
+       reader stores outside that range instead of passing it on. */
+    if (status.percent > 100)
+        status.percent = 100;
+    return status;
 }
