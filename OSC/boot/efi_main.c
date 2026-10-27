@@ -1013,7 +1013,164 @@ static int fse_api_file_write(const char *path, const char *buf, unsigned int le
     file->Close(file);
     return 0;
 }
-static fisix_api_t fse_api = { fse_api_print, fse_api_print_u64, fse_api_print_newline, fse_api_read_key, fse_api_file_read, fse_api_file_write };
+/* ---- .fse API v2 ---- */
+static int fse_api_dir_list(const char *path, char *buf, unsigned int buf_size)
+{
+    CHAR16 wpath[128];
+    EFI_FILE_PROTOCOL *dir = 0, *root = 0;
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs = 0;
+    int count = 0;
+    unsigned int used = 0;
+    uint8_t info_buf[512];
+    if (!buf || buf_size == 0) return -1;
+    buf[0] = 0;
+    if (!path || !path[0] || (path[0] == '\\' && !path[1]) || (path[0] == '/' && !path[1])) {
+        if (!gBS || !gBS->LocateProtocol) return -1;
+        if (fisix_selected_fs) fs = fisix_selected_fs;
+        else if (EFI_ERROR(gBS->LocateProtocol(&EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID, 0, (void **)&fs)) || !fs) return -1;
+        if (EFI_ERROR(fs->OpenVolume(fs, &root)) || !root) return -1;
+        dir = root;
+    } else {
+        if (!fse_ascii_to_char16(path, wpath, 128)) return -1;
+        if (!terminal_open_file(wpath, EFI_FILE_MODE_READ, 0, &dir)) return -1;
+    }
+    for (;;) {
+        UINTN sz = sizeof(info_buf);
+        EFI_FILE_INFO *info;
+        EFI_STATUS st = dir->Read(dir, &sz, info_buf);
+        if (EFI_ERROR(st) || sz == 0) break;
+        info = (EFI_FILE_INFO *)info_buf;
+        if (!info->FileName[0] || info->FileName[0] == '.') continue;
+        {
+            char name[128];
+            unsigned int ni = 0, k = 0;
+            int is_dir = (info->Attribute & EFI_FILE_DIRECTORY) ? 1 : 0;
+            while (info->FileName[ni] && ni + 1 < sizeof(name)) { name[ni] = (char)(uint8_t)info->FileName[ni]; ni++; }
+            name[ni] = 0;
+            /* Skip a name that would not fit, rather than cutting it. */
+            if (used + ni + (is_dir ? 1 : 0) + 1 + 1 > buf_size) continue;
+            for (k = 0; k < ni; k++) buf[used++] = name[k];
+            if (is_dir) buf[used++] = '/';
+            buf[used++] = '\n';
+            buf[used] = 0;
+            count++;
+        }
+    }
+    dir->Close(dir);
+    return count;
+}
+static int fse_api_file_delete(const char *path)
+{
+    CHAR16 wpath[128];
+    EFI_FILE_PROTOCOL *file = 0;
+    if (!path) return -1;
+    if (fisix_live_boot) return -1;
+    if (!fse_ascii_to_char16(path, wpath, 128)) return -1;
+    if (!terminal_open_file(wpath, EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0, &file)) return -1;
+    if (EFI_ERROR(file->Delete(file))) return -1;
+    return 0;
+}
+static int fse_api_file_rename(const char *old_path, const char *new_path)
+{
+    CHAR16 wold[128], wnew[128];
+    EFI_FILE_PROTOCOL *src = 0, *dst = 0;
+    uint8_t chunk[1024];
+    uint8_t info_buf[512];
+    UINTN isz;
+    if (!old_path || !new_path) return -1;
+    if (fisix_live_boot) return -1;
+    if (!fse_ascii_to_char16(old_path, wold, 128) || !fse_ascii_to_char16(new_path, wnew, 128)) return -1;
+    if (!terminal_open_file(wold, EFI_FILE_MODE_READ, 0, &src)) return -1;
+    isz = sizeof(info_buf);
+    if (!EFI_ERROR(src->GetInfo(src, &EFI_FILE_INFO_GUID, &isz, info_buf))) {
+        if (((EFI_FILE_INFO *)info_buf)->Attribute & EFI_FILE_DIRECTORY) { src->Close(src); return -1; }
+    }
+    if (!terminal_open_file(wnew, EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, EFI_FILE_ARCHIVE, &dst)) { src->Close(src); return -1; }
+    for (;;) {
+        UINTN n = sizeof(chunk);
+        EFI_STATUS st = src->Read(src, &n, chunk);
+        if (EFI_ERROR(st)) { src->Close(src); dst->Close(dst); fse_api_file_delete(new_path); return -1; }
+        if (n == 0) break;
+        {
+            UINTN w = n;
+            if (EFI_ERROR(dst->Write(dst, &w, chunk)) || w != n) { src->Close(src); dst->Close(dst); fse_api_file_delete(new_path); return -1; }
+        }
+    }
+    src->Close(src);
+    if (dst->Flush) dst->Flush(dst);
+    dst->Close(dst);
+    return fse_api_file_delete(old_path);
+}
+static int fse_api_file_mkdir(const char *path)
+{
+    CHAR16 wpath[128];
+    EFI_FILE_PROTOCOL *dir = 0;
+    if (!path) return -1;
+    if (fisix_live_boot) return -1;
+    if (!fse_ascii_to_char16(path, wpath, 128)) return -1;
+    if (!terminal_open_file(wpath, EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, EFI_FILE_DIRECTORY, &dir)) return -1;
+    dir->Close(dir);
+    return 0;
+}
+static int fse_api_file_exists(const char *path)
+{
+    CHAR16 wpath[128];
+    EFI_FILE_PROTOCOL *file = 0;
+    if (!path) return -1;
+    if (!fse_ascii_to_char16(path, wpath, 128)) return -1;
+    if (!terminal_open_file(wpath, EFI_FILE_MODE_READ, 0, &file)) return 0;
+    file->Close(file);
+    return 1;
+}
+static int fse_api_file_size(const char *path)
+{
+    CHAR16 wpath[128];
+    EFI_FILE_PROTOCOL *file = 0;
+    uint8_t info_buf[512];
+    UINTN sz = sizeof(info_buf);
+    uint64_t size;
+    if (!path) return -1;
+    if (!fse_ascii_to_char16(path, wpath, 128)) return -1;
+    if (!terminal_open_file(wpath, EFI_FILE_MODE_READ, 0, &file)) return -1;
+    if (EFI_ERROR(file->GetInfo(file, &EFI_FILE_INFO_GUID, &sz, info_buf))) { file->Close(file); return -1; }
+    if (((EFI_FILE_INFO *)info_buf)->Attribute & EFI_FILE_DIRECTORY) { file->Close(file); return -1; }
+    size = ((EFI_FILE_INFO *)info_buf)->FileSize;
+    file->Close(file);
+    return size > 0x7fffffffULL ? -1 : (int)size;
+}
+static void fse_api_get_time(unsigned int *year, unsigned int *month, unsigned int *day,
+                             unsigned int *hour, unsigned int *minute, unsigned int *second)
+{
+    /* UEFI RuntimeServices: 24-byte table header, then GetTime. */
+    typedef struct { EFI_TABLE_HEADER Hdr; EFI_STATUS (EFIAPI *GetTime)(EFI_TIME *Time, void *Capabilities); } fisix_runtime_t;
+    EFI_TIME tm;
+    if (year) *year = 0;
+    if (month) *month = 0;
+    if (day) *day = 0;
+    if (hour) *hour = 0;
+    if (minute) *minute = 0;
+    if (second) *second = 0;
+    if (!gST || !gST->RuntimeServices) return;
+    if (EFI_ERROR(((fisix_runtime_t *)gST->RuntimeServices)->GetTime(&tm, 0))) return;
+    if (year) *year = tm.Year;
+    if (month) *month = tm.Month;
+    if (day) *day = tm.Day;
+    if (hour) *hour = tm.Hour;
+    if (minute) *minute = tm.Minute;
+    if (second) *second = tm.Second;
+}
+static void fse_api_clear_screen(void)
+{
+    boot_clear_screen();
+}
+static void fse_api_sleep_ms(unsigned int ms)
+{
+    typedef EFI_STATUS (EFIAPI *fisix_stall_t)(UINTN Microseconds);
+    if (gBS && gBS->Stall) ((fisix_stall_t)gBS->Stall)((UINTN)ms * 1000);
+}
+static fisix_api_t fse_api = { fse_api_print, fse_api_print_u64, fse_api_print_newline, fse_api_read_key, fse_api_file_read, fse_api_file_write,
+    fse_api_dir_list, fse_api_file_delete, fse_api_file_rename, fse_api_file_mkdir, fse_api_file_exists, fse_api_file_size,
+    fse_api_get_time, fse_api_clear_screen, fse_api_sleep_ms };
 
 static int fse_run_file(const CHAR16 *path)
 {

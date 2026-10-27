@@ -1,4 +1,5 @@
 /* reterm.fse - ReTerm / Dosify for FisixOS, compiled with tools/fisix-gcc.
+ * v0.4, 2026-10-26: now uses the .fse API v2 (see boot/fse.h).
  * v0.3, 2026-10-25, at Derek's direction:
  *   - .mod files REMOVED. No modlist/modrun/modadd, no .comp,
  *     no module installer. ReTerm no longer uses .mod files.
@@ -15,14 +16,14 @@
  *     verbatim. Commands that work here use only the .fse
  *     API: print, read_key, file_read, file_write.
  * Working here: help, echo, type <file>, copy <src> <dst>,
- * ver, cls, whoami, hostname, set/unset/env, path, calc,
- * dir (installed tools list, see below), cd (in-memory),
- * rem, exit. Not available in .fse v1, and said so honestly:
- * dir of an arbitrary folder, del, move/ren delete step,
- * date/time, ping/ipconfig and other network commands.
- * dir here lists the installed tools in SYSTEM/APPS/
- * (the install location), not an arbitrary folder, because
- * the .fse API has no directory listing.
+ * ver, cls (real clear screen), whoami, hostname, set/unset/env,
+ * path, calc, dir [path] (any folder, blank = volume root),
+ * del, move/ren, mkdir, date, time, size <file>, cd (in-memory
+ * display only, it does not change where dir looks), rem, exit.
+ * Still honestly unavailable: ping/ipconfig and other network
+ * commands, and external programs (a .fse has no processes).
+ * Writes (del/move/mkdir/copy to a new file) fail in Liveboot
+ * by design; use Installed mode for writes.
  * Usage: run reterm.fse
  */
 #include "../boot/fse.h"
@@ -99,7 +100,8 @@ static int env_find(const char *name)
 static void print_help(fisix_api_t *api)
 {
     out(api, "DOSIFY for FisixOS (ReTerm) - CMD-style shell, batch removed"); nl(api);
-    out(api, "dir, cd, type <file>, copy <src> <dst>, echo <text>, cls"); nl(api);
+    out(api, "dir [path], del <file>, move <src> <dst>, ren <old> <new>, mkdir <dir>"); nl(api);
+    out(api, "type <file>, copy <src> <dst>, echo <text>, cls, date, time, size <file>"); nl(api);
     out(api, "ver, whoami, hostname, set, unset, env, path, calc <a+b>"); nl(api);
     out(api, "gui, rem, exit. .bat files are NOT run. .mod files are REMOVED."); nl(api);
 }
@@ -121,14 +123,50 @@ int fse_main(fisix_api_t *api)
         if (seq(g_line, "help")) print_help(api);
         else if (starts(g_line, "echo ")) out(api, g_line + 5), nl(api);
         else if (seq(g_line, "echo")) nl(api);
-        else if (seq(g_line, "ver")) { out(api, "DOSIFY for FisixOS 0.3 (ReTerm, .fse)"); nl(api); }
-        else if (seq(g_line, "cls")) { int i; for (i = 0; i < 20; i++) nl(api); }
+        else if (seq(g_line, "ver")) { out(api, "DOSIFY for FisixOS 0.4 (ReTerm, .fse, API v2)"); nl(api); }
+        else if (seq(g_line, "cls")) api->clear_screen();
         else if (seq(g_line, "whoami")) { out(api, "fisix"); nl(api); }
         else if (seq(g_line, "hostname")) { out(api, "FISIXOS"); nl(api); }
-        else if (seq(g_line, "dir")) {
-            out(api, "Installed tools in SYSTEM/APPS/:"); nl(api);
-            out(api, "BROWSY.FSE  PATHIFY.FSE  RETERM.FSE  Z.FSE  CLIPONG.FSE  NANO.FSE"); nl(api);
-            out(api, "(dir of an arbitrary folder is not in the .fse API)"); nl(api);
+        else if (seq(g_line, "dir") || starts(g_line, "dir ")) {
+            const char *dp = seq(g_line, "dir") ? "" : g_line + 4;
+            int dc;
+            while (*dp == ' ') dp++;
+            dc = api->dir_list(dp, g_buf, sizeof(g_buf));
+            if (dc < 0) { out(api, "dir: could not list "); out(api, dp[0] ? dp : "(root)"); nl(api); }
+            else if (dc == 0) { out(api, "(empty)"); nl(api); }
+            else { out(api, g_buf); }
+        }
+        else if (starts(g_line, "del ") || starts(g_line, "erase ")) {
+            const char *dp = g_line[3] == ' ' ? g_line + 4 : g_line + 6;
+            while (*dp == ' ') dp++;
+            if (api->file_delete(dp) == 0) { out(api, "del: deleted "); out(api, dp); nl(api); }
+            else { out(api, "del: failed (Liveboot? not found?)"); nl(api); }
+        }
+        else if (starts(g_line, "mkdir ") || starts(g_line, "md ")) {
+            const char *dp = g_line[1] == 'd' ? g_line + 3 : g_line + 6;
+            while (*dp == ' ') dp++;
+            if (api->file_mkdir(dp) == 0) { out(api, "mkdir: created "); out(api, dp); nl(api); }
+            else { out(api, "mkdir: failed (Liveboot? already exists?)"); nl(api); }
+        }
+        else if (starts(g_line, "move ") || starts(g_line, "ren ") || starts(g_line, "rename ")) {
+            unsigned int p = 0, s, e; char src[64], dst[64]; int verb = starts(g_line, "move ") ? 5 : (starts(g_line, "ren ") ? 4 : 7);
+            p = (unsigned int)verb; while (g_line[p] == ' ') p++; s = p; while (g_line[p] && g_line[p] != ' ') p++; e = p;
+            { unsigned int k; for (k = 0; k < e - s && k < 63; k++) src[k] = g_line[s + k]; src[k] = 0; }
+            while (g_line[p] == ' ') p++;
+            scpy(dst, g_line + p);
+            if (api->file_rename(src, dst) == 0) { out(api, "renamed "); out(api, src); out(api, " -> "); out(api, dst); nl(api); }
+            else { out(api, "rename/move: failed (Liveboot? directory? not found?)"); nl(api); }
+        }
+        else if (seq(g_line, "date") || seq(g_line, "time")) {
+            unsigned int y, mo, d, h, mi, se;
+            api->get_time(&y, &mo, &d, &h, &mi, &se);
+            if (seq(g_line, "date")) { api->print_u64(y); out(api, "-"); api->print_u64(mo); out(api, "-"); api->print_u64(d); nl(api); }
+            else { api->print_u64(h); out(api, ":"); api->print_u64(mi); out(api, ":"); api->print_u64(se); nl(api); }
+        }
+        else if (starts(g_line, "size ")) {
+            int sz = api->file_size(g_line + 5);
+            if (sz < 0) { out(api, "size: could not read "); out(api, g_line + 5); nl(api); }
+            else { out(api, g_line + 5); out(api, ": "); api->print_u64((unsigned long long)sz); out(api, " bytes"); nl(api); }
         }
         else if (starts(g_line, "cd ") || starts(g_line, "chdir ")) {
             const char *d = g_line[3] == ' ' ? g_line + 3 : g_line + 6;
@@ -176,7 +214,6 @@ int fse_main(fisix_api_t *api)
         else if (starts(g_line, "path ")) { scpy(g_path, g_line + 5); out(api, "path set (in memory)"); nl(api); }
         else if (starts(g_line, "calc ")) do_calc(api, g_line);
         else if (starts(g_line, "rem") || starts(g_line, "::")) { /* comment, no-op */ }
-        else if (seq(g_line, "del") || starts(g_line, "del ") || seq(g_line, "move") || starts(g_line, "move ") || seq(g_line, "ren") || starts(g_line, "ren ")) { out(api, "Not in .fse API: no delete/rename call (copy works, see help)."); nl(api); }
         else if (g_line[0] == 0) { /* blank */ }
         else { out(api, "'"); out(api, g_line); out(api, "' is not recognized as an internal or external command,"); nl(api); out(api, "operable program or batch file."); nl(api); }
     }

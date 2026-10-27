@@ -46,7 +46,7 @@
 
 #define FISIX_FSE_MAGIC 0x31455346u
 #define FISIX_FSE_VERSION 1
-#define FISIX_FSE_API_VERSION 1
+#define FISIX_FSE_API_VERSION 2
 #define FISIX_FSE_LOAD_ADDRESS 0x300000ULL
 #define FISIX_FSE_HEADER_SIZE 64
 #define FISIX_FSE_MAX_CODE_SIZE (256 * 1024)
@@ -69,6 +69,33 @@ typedef struct fisix_api {
     int (*read_key)(void);
     int (*file_read)(const char *path, char *buf, unsigned int buf_size);
     int (*file_write)(const char *path, const char *buf, unsigned int len);
+    /* API v2, appended only, so v1 programs still work: the fields
+       above never move. Paths use the same style as file_read /
+       file_write (e.g. "SYSTEM\\APPS", "hello.txt"); an empty
+       path, "\" or "/" means the volume root for dir_list.
+       Return conventions: dir_list returns the entry count, and
+       buf holds newline-separated names, directories suffixed
+       with '/'; a name that would not fit is skipped, not cut.
+       file_delete / file_rename / file_mkdir return 0 on success,
+       -1 on failure (including Liveboot, where writes fail by
+       design, and rename of a directory, which is not supported
+       - rename is copy-then-delete for regular files).
+       file_exists returns 1 if present, 0 if absent, -1 on error.
+       file_size returns the file size in bytes, -1 if it cannot
+       be read as a regular file. get_time fills all six fields
+       from the firmware clock (0 if the clock is unavailable).
+       clear_screen clears the text screen; sleep_ms stalls for
+       approximately that many milliseconds (firmware Stall). */
+    int (*dir_list)(const char *path, char *buf, unsigned int buf_size);
+    int (*file_delete)(const char *path);
+    int (*file_rename)(const char *old_path, const char *new_path);
+    int (*file_mkdir)(const char *path);
+    int (*file_exists)(const char *path);
+    int (*file_size)(const char *path);
+    void (*get_time)(unsigned int *year, unsigned int *month, unsigned int *day,
+                     unsigned int *hour, unsigned int *minute, unsigned int *second);
+    void (*clear_screen)(void);
+    void (*sleep_ms)(unsigned int ms);
 } fisix_api_t;
 
 typedef int (*fse_entry_t)(fisix_api_t *api);
