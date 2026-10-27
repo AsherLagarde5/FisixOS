@@ -28,6 +28,11 @@ void idt_set_gate(int vec, uint64_t handler, uint16_t selector, uint8_t flags)
     if (vec < 0 || vec >= IDT_ENTRIES) {
         return;
     }
+    if (handler == 0) {
+        /* Never install a null gate: a stray call must not turn a
+           vector into a jump to address 0. */
+        return;
+    }
     idt[vec].offset_low = handler & 0xFFFF;
     idt[vec].offset_mid = (handler >> 16) & 0xFFFF;
     idt[vec].offset_high = (handler >> 32) & 0xFFFFFFFF;
