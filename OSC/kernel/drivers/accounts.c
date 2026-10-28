@@ -89,6 +89,10 @@ static int accounts_save(void)
        touch any disk, but report success so setup does not loop asking
        for session-only confirmation. */
     if (fisix_live_boot) return 1;
+    /* Never write a store with an out-of-range count: the fixed-size
+       entries array below would overflow. */
+    if (account_count < 0 || account_count > FISIX_MAX_USERS)
+        return 0;
     EFI_FILE_PROTOCOL *file = 0;
     account_store_t store;
     UINTN bytes = sizeof(store);
