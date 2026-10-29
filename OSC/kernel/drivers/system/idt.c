@@ -33,6 +33,11 @@ void idt_set_gate(int vec, uint64_t handler, uint16_t selector, uint8_t flags)
            vector into a jump to address 0. */
         return;
     }
+    if (selector == 0) {
+        /* A null segment selector would fault on interrupt
+           delivery, so refuse a gate that can never run. */
+        return;
+    }
     idt[vec].offset_low = handler & 0xFFFF;
     idt[vec].offset_mid = (handler >> 16) & 0xFFFF;
     idt[vec].offset_high = (handler >> 32) & 0xFFFFFFFF;
