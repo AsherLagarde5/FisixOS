@@ -1,0 +1,6 @@
+[package]
+name = "fisixos-rust-drivers"
+version = "0.1.0"
+edition = "2021"
+description = "Rust mirrors of FisixOS drivers for Dell Latitude 5420 (Tiger Lake) - host-tested, not yet linked into the C kernel"
+license = "GPL-2.0"

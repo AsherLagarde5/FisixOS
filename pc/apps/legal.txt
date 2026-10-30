@@ -1,0 +1,21 @@
+FisixOS - Legal Notice
+======================
+FisixOS itself: licensed under GPLv2 (see LICENSE).
+Do NOT treat FisixOS as MIT-licensed.
+
+Third-party permissive code in FisixOS:
+- kernel/lib/fisix_crc32, fisix_sha256, fisix_printf:
+  FisixOS-original, GPLv2. Spec-based, not verbatim
+  copies of Brad Conte public-domain SHA-256 or mpaland/printf
+  MIT code, which were consulted as references.
+- KallistiOS (Dreamcast only): BSD-style KOS License,
+  attribution required. No Sega BIOS/ROMs bundled.
+- FatFs (ChaN, BSD-style 1-clause): NOT copied wholesale.
+  FisixOS fat.c is original code.
+
+NOT bundled: Nintendo/Commodore/Sega/TI BIOS or ROMs,
+Wi-Fi firmware blobs, proprietary drivers, GPL code.
+Wi-Fi firmware is fetched online by the user, not bundled.
+
+Full texts: LICENSES/ in the source tree.
+Terminal / About: fisix_legal_text() in kernel/lib/fisix_legal.c

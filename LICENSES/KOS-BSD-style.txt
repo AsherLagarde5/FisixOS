@@ -1,0 +1,15 @@
+KallistiOS (KOS) License - summary, NOT the full text
+====================================================
+KallistiOS is licensed under the terms of the "new" BSD license,
+called the KOS License when combined with the KOS copyright notice.
+Attribution is NOT optional.
+
+Full text: LICENSE.KOS in the KallistiOS distribution
+(~/workspace/toolchain-dreamcast/kos), and
+https://kos-docs.dreamcast.wiki/md_doc_2LICENSE.html
+
+This file is a summary only. Do NOT replace LICENSE.KOS with it.
+If FisixDreamcast is distributed, include the full KOS License
+text and KOS attribution, per KOS licensing docs.
+KallistiOS is developed independently from Sega; no Sega BIOS,
+ROMs, or SDK code is included in FisixDreamcast.

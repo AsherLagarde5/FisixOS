@@ -1,0 +1,16 @@
+FatFs License - summary, NOT a copy of FatFs code
+=================================================
+FatFs, Generic FAT Filesystem Module, Copyright (C) ChaN.
+FatFs has its own minimalistic license, similar to BSD, equivalent
+to a 1-clause BSD license for source redistribution:
+- Redistributions of source code must retain the above copyright
+  notice.
+- Redistributions in binary form (embedded code, binary library,
+  hex files) do not need to include FatFs in documentation.
+
+Source: http://elm-chan.org/fsw/ff/doc/appnote.html (About FatFs License)
+
+FisixOS does NOT currently include FatFs code. Its fat.c is
+original FisixOS code. If FatFs is integrated later, include
+its full license text and retain ChaN's copyright header in
+every FatFs source file, and update LICENSES/THIRD-PARTY.md.

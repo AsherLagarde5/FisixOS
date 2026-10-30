@@ -1,0 +1,43 @@
+#include "accessories.h"
+const accessory_t fisixdc_accessories[] = {
+  {"VMU second screen + save", ACC_WORKING, "KOS vmu_draw_lcd, examples/dreamcast/vmu"},
+  {"VMU 4x Memory Card", ACC_SCAFFOLD_UNTESTED, "Maple memory card, larger capacity, untested here"},
+  {"Third-party memory cards", ACC_SCAFFOLD_UNTESTED, "Maple, compatibility varies, untested here"},
+  {"Standard controller", ACC_WORKING, "KOS maple controller, analog + buttons"},
+  {"Jump Pack / Rumble Pack", ACC_WORKING, "KOS examples/dreamcast/rumble"},
+  {"Keyboard", ACC_WORKING, "KOS dc/maple/keyboard.h, examples/dreamcast/keyboard"},
+  {"Mouse", ACC_WORKING, "KOS dc/maple/mouse.h"},
+  {"Dreameye camera", ACC_SCAFFOLD_UNTESTED, "Japan only, webcam + still + mic, examples/dreamcast/dreameye, untested here"},
+  {"Light Gun / Dream Blaster", ACC_SCAFFOLD_UNTESTED, "KOS examples/dreamcast/lightgun, Mad Catz US version, untested here"},
+  {"Arcade Stick", ACC_SCAFFOLD_UNTESTED, "Maple controller, untested here"},
+  {"Twin Stick (Virtual-On)", ACC_SCAFFOLD_UNTESTED, "Dual analog Maple, untested here"},
+  {"Race Controller / steering wheel", ACC_SCAFFOLD_UNTESTED, "Analog + pedals, untested here"},
+  {"Fishing Controller", ACC_SCAFFOLD_UNTESTED, "Motion + reel, untested here"},
+  {"Maracas Controller + mat", ACC_SCAFFOLD_UNTESTED, "Samba de Amigo, motion, untested here"},
+  {"Microphone (Seaman / Karaoke)", ACC_SCAFFOLD_UNTESTED, "Maple mic, untested here"},
+  {"Densha de Go! train controller", ACC_SCAFFOLD_UNTESTED, "Japan only, untested here"},
+  {"Dance mat", ACC_SCAFFOLD_UNTESTED, "Maple, untested here"},
+  {"Pop'n controller", ACC_SCAFFOLD_UNTESTED, "Maple, untested here"},
+  {"DreamParaPara sensors", ACC_SCAFFOLD_UNTESTED, "Maple, untested here"},
+  {"Mission Stick", ACC_SCAFFOLD_UNTESTED, "Analog stick, untested here"},
+  {"Panther DC", ACC_SCAFFOLD_UNTESTED, "Trackball + stick, untested here"},
+  {"VCD remote", ACC_SCAFFOLD_UNTESTED, "Infrared / Maple, untested here"},
+  {"Built-in 56k Modem", ACC_WORKING, "KOS examples/dreamcast/modem, dial-up only"},
+  {"Broadband Adapter (BBA)", ACC_SCAFFOLD_UNTESTED, "Ethernet, KOS network, untested here"},
+  {"Dreamphone", ACC_SCAFFOLD_UNTESTED, "Maple phone, untested here"},
+  {"MIDI Interface Cable", ACC_SCAFFOLD_UNTESTED, "Serial MIDI, untested here"},
+  {"Neo Geo Pocket link cable", ACC_SCAFFOLD_UNTESTED, "Serial link, untested here"},
+  {"VS / Taisen cable", ACC_SCAFFOLD_UNTESTED, "Console-to-console, untested here"},
+  {"Coder's cable", ACC_SCAFFOLD_UNTESTED, "Serial debug, untested here"},
+  {"Serial SD adapter", ACC_SCAFFOLD_UNTESTED, "Serial storage, untested here"},
+  {"VGA Box (480p)", ACC_WORKING, "Output mode, KOS video, not a driver in same sense"},
+  {"RF / SCART / AV cables", ACC_WORKING, "Output modes, document as output support"},
+  {"DVD Player", ACC_STUB_UNRELEASED, "Unreleased, no hardware, stub only"},
+  {"Zip Drive", ACC_STUB_UNRELEASED, "Unreleased / prototype only, stub only"},
+  {"Swatch Access", ACC_STUB_UNRELEASED, "Unreleased, stub only"},
+  {"VMU MP3 Player", ACC_STUB_UNRELEASED, "Unreleased, stub only"},
+};
+const int fisixdc_accessory_count = sizeof(fisixdc_accessories) / sizeof(fisixdc_accessories[0]);
+const char *acc_status_text(acc_status_t s) {
+  return s == ACC_WORKING ? "WORKING (KOS)" : s == ACC_SCAFFOLD_UNTESTED ? "SCAFFOLD UNTESTED" : "STUB UNRELEASED";
+}
