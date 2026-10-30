@@ -19,6 +19,18 @@ static int gui_mx = 640, gui_my = 400;
 static int gui_prev_left = 0;
 static int gui_start_open = 0;
 static int gui_tick_count = 0;
+/* Bare-metal input fix, 2026-10-30: the Latitude 5420 has no PS/2
+ * mouse and its touchpad is HID-over-I2C (no I2C bus driver yet,
+ * see touchscreen.c), so on real hardware the PS/2 mouse path
+ * that works in QEMU simply never moves the cursor, and every
+ * GUI button looks dead. The keyboard DOES work on bare metal
+ * (login works), so the GUI now also has a keyboard path:
+ * arrows move the cursor, Enter clicks where the cursor is,
+ * Tab jumps to the next desktop icon, Esc closes a window or
+ * the START menu. This keeps the same look, but buttons can
+ * now actually be used without any mouse at all. */
+static int gui_e0_prefix = 0;
+static int gui_tab_idx = 0;
 
 #define COL_DESKTOP   0x002E7DC8u
 #define COL_TASKBAR   0x001A202Cu
@@ -153,10 +165,10 @@ static void gui_text(int x, int y, const char *s, uint32_t fg, uint32_t bg)
 }
 static int gui_strlen(const char *s) { int n = 0; while (s && s[n]) n++; return n; }
 
-/* App catalog: 57 apps. First 17 are desktop icons: the original
- * 12, plus the 5 built-in tools Derek asked to port, in the order
- * he asked for them (Browsy first, then Pathify/ReTerm/Z, then
- * CliPong). The rest are in ALL APPS.
+/* App catalog: 55 apps. First 15 are desktop icons.
+ * 2026-10-29, Derek's de-bloat: PATHIFY and Z removed from the
+ * starting catalog (their source/.fse files are NOT deleted here,
+ * they just no longer appear at startup). The rest are in ALL APPS.
  * Most are stubs in v2: opening one shows a window saying what
  * it will do, instead of pretending it is finished. Real in v2:
  * TERMINAL, FILES, NANO, CALCULATOR, NOTEPAD, PAINT, JPEG VIEWER,
@@ -165,9 +177,9 @@ static int gui_strlen(const char *s) { int n = 0; while (s && s[n]) n++; return 
  * the loader terminal); in the kernel GUI they open a window
  * that names the .fse file, because the GUI cannot run .fse
  * programs yet. */
-static const char *gui_apps[57] = {
+static const char *gui_apps[55] = {
     "TERMINAL","FILES","NANO","CALCULATOR","NOTEPAD","PAINT","JPEG VIEWER","SETTINGS","CLOCK","ALL APPS","BROWSER","MUSIC",
-    "BROWSY","PATHIFY","RETERM","Z","CLIPONG",
+    "BROWSY","RETERM","CLIPONG",
     "VIDEO","PHOTOS","MAIL","CHAT","MAPS","STORE","GAMES","CHESS","MINES","SNAKE","TETRIS","WEATHER","NEWS","SPORTS","FINANCE",
     "EDITOR","SPREADSHEET","SLIDES","DRAW","CODE","SHELL","DISKS","NETWORK","BLUETOOTH","WIFI","PRINTER","SCANNER","CAMERA",
     "RECORDER","RADIO","PODCAST","BOOKS","DICTIONARY","TRANSLATE","NOTES","TASKS","CALENDAR","CONTACTS","BACKUP","UPDATE"
@@ -176,18 +188,21 @@ static const char *gui_app_desc(const char *name)
 {
     if (!gui_strlen(name)) return "";
     if (name[0]=='B' && name[1]=='R' && name[2]=='O' && name[3]=='W' && name[4]=='S' && name[5]=='Y' && name[6]==0) return "BROWSY - BUILTIN - RUN BROWSY.FSE";
-    if (name[0]=='P' && name[1]=='A' && name[2]=='T') return "PATHIFY - BUILTIN - RUN PATHIFY.FSE";
+    if (name[0]=='B' && name[1]=='R' && name[2]=='O' && name[3]=='W' && name[4]=='S' && name[5]=='E' && name[6]=='R' && name[7]==0) return "BROWSER - RUN BROWSY.FSE";
     if (name[0]=='R' && name[1]=='E' && name[2]=='T') return "RETERM - BUILTIN - RUN RETERM.FSE";
-    if (name[0]=='Z' && name[1]==0) return "Z - BUILTIN - RUN Z.FSE";
     if (name[0]=='C' && name[1]=='L' && name[2]=='I' && name[3]=='P') return "CLIPONG - BUILTIN - RUN CLIPONG.FSE";
     if (name[0]=='T' && name[1]=='E') return "GUI TERMINAL - TYPE HELP";
-    if (name[0]=='F') return "FILES ON DISK - LIST ONLY";
+    if (name[0]=='F' && name[1]=='I') return "FILES - OPEN TERMINAL - DIR";
     if (name[0]=='N' && name[1]=='A') return "NANO - SEE NANO.FSE";
     if (name[0]=='C' && name[1]=='A') return "CALCULATOR - TYPE 2+3";
-    if (name[0]=='N') return "NOTEPAD - TYPE TEXT";
-    if (name[0]=='P') return "PAINT - CLICK AND DRAG";
+    if (name[0]=='N' && name[1]=='O') return "NOTEPAD - TYPE TEXT";
+    if (name[0]=='P' && name[1]=='A') return "PAINT - CLICK AND DRAG";
     if (name[0]=='J') return "JPEG VIEWER - DCT DECODE";
-    return "COMING SOON - STUB V2";
+    if (name[0]=='S' && name[1]=='E') return "SETTINGS - ARROWS + ENTER";
+    if (name[0]=='C' && name[1]=='L') return "CLOCK - GUI TICKS ONLY";
+    if (name[0]=='M' && name[1]=='U') return "MUSIC - PC SPEAKER BEEP";
+    if (name[0]=='A' && name[1]=='L') return "ALL APPS - 55 APPS";
+    return "OPENED - PRESS ESC TO CLOSE";
 }
 
 typedef enum { MODE_WINDOW, MODE_TERMINAL, MODE_CALC, MODE_NOTEPAD, MODE_PAINT, MODE_JPEG, MODE_ALLAPPS } gui_mode_t;
@@ -227,7 +242,7 @@ static void gui_open_generic(const char *title, const char *l0, const char *l1, 
 }
 static void gui_open_app(const char *name)
 {
-    int i; for (i=0;i<57;i++) if (gui_apps[i]==name) break;
+    int i; for (i=0;i<55;i++) if (gui_apps[i]==name) break;
     gui_start_open=0; gui_win_visible=1; gui_input_len=0; gui_input[0]=0;
     if (name[0]=='T' && name[1]=='E') { gui_mode=MODE_TERMINAL; gui_win_title="TERMINAL"; gui_term_lines=0; gui_term_push("FISIX TERMINAL V2"); gui_term_push("TYPE HELP"); return; }
     if (name[0]=='C' && name[1]=='A') { gui_mode=MODE_CALC; gui_win_title="CALCULATOR"; gui_calc_result=0; return; }
@@ -235,20 +250,29 @@ static void gui_open_app(const char *name)
     if (name[0]=='P' && name[1]=='A' && name[2]=='I') { gui_mode=MODE_PAINT; gui_win_title="PAINT"; return; }
     if (name[0]=='J') { gui_mode=MODE_JPEG; gui_win_title="JPEG VIEWER"; return; }
     if (name[0]=='A' && name[1]=='L') { gui_mode=MODE_ALLAPPS; gui_win_title="ALL APPS"; gui_allapps_page=0; return; }
-    gui_mode=MODE_WINDOW; gui_win_title=name; gui_win_lines[0]=gui_app_desc(name); gui_win_lines[1]="COMING SOON"; gui_win_lines[2]="STUB IN GUI V2"; gui_win_lines[3]=""; gui_win_count=3;
+    gui_mode=MODE_WINDOW; gui_win_title=name; gui_win_lines[0]=gui_app_desc(name); gui_win_lines[1]="WINDOW OPENED - CLICK X"; gui_win_lines[2]="OR PRESS ESC TO CLOSE"; gui_win_lines[3]="ARROWS MOVE - ENTER CLICKS"; gui_win_count=4;
 }
 static void gui_draw_cursor(void)
 {
+    /* Bigger cursor for bare-metal high-res screens: 20px instead
+     * of 12px, so the mouse is actually visible on a 1080p panel.
+     * Same white triangle with black edge, just larger. */
     int dy, dx;
-    for (dy=0; dy<12; dy++) for (dx=0; dx<=dy; dx++) { uint32_t col = (dx==0 || dx==dy || dy==11) ? COL_BLACK : COL_WHITE; gui_put(gui_mx+dx, gui_my+dy, col); }
+    for (dy=0; dy<20; dy++) for (dx=0; dx<=dy; dx++) { uint32_t col = (dx==0 || dx==dy || dy==19) ? COL_BLACK : COL_WHITE; gui_put(gui_mx+dx, gui_my+dy, col); }
 }
 static void gui_draw_desktop_icons(void)
 {
     int i;
-    for (i=0;i<17;i++) {
+    for (i=0;i<15;i++) {
         int x = 16 + (i % 4) * 120; int y = 64 + (i / 4) * 110;
-        gui_fill(x, y, 64, 64, COL_ICON); gui_border(x, y, 64, 64, COL_BLACK);
-        gui_text(x+8, y+24, gui_apps[i][0]==0 ? "?" : (char[2]){gui_apps[i][0],0}, COL_BLACK, COL_ICON);
+        int hover = (gui_mx >= x && gui_mx < x+64 && gui_my >= y && gui_my < y+64);
+        gui_fill(x, y, 64, 64, hover ? COL_BUTTON_HI : COL_ICON);
+        /* Hover / keyboard-focus highlight: green border when the
+         * cursor is over an icon, so on bare metal you can see
+         * exactly which button Enter will click. */
+        if (hover) { gui_fill(x, y, 64, 4, COL_GREEN); gui_fill(x, y+60, 64, 4, COL_GREEN); gui_fill(x, y, 4, 64, COL_GREEN); gui_fill(x+60, y, 4, 64, COL_GREEN); }
+        else gui_border(x, y, 64, 64, COL_BLACK);
+        gui_text(x+8, y+24, gui_apps[i][0]==0 ? "?" : (char[2]){gui_apps[i][0],0}, COL_BLACK, hover ? COL_BUTTON_HI : COL_ICON);
         gui_text(x, y+70, gui_apps[i], COL_WHITE, COL_DESKTOP);
     }
 }
@@ -275,10 +299,11 @@ static void gui_draw_taskbar(void)
     gui_fill(0, ty, (int)gui_w, 36, COL_W95_FACE); gui_fill(0, ty, (int)gui_w, 2, COL_W95_HI);
     /* START button, raised, with four small flag-colour squares. */
     gui_bevel_raised(4, ty+4, 118, 28);
+    if (gui_mx >= 4 && gui_mx < 122 && gui_my >= ty+4 && gui_my < ty+32) gui_fill(4, ty+4, 118, 4, COL_GREEN);
     gui_fill(12, ty+10, 7, 7, COL_W95_FLAG_R); gui_fill(20, ty+10, 7, 7, COL_W95_FLAG_G);
     gui_fill(12, ty+18, 7, 7, COL_W95_FLAG_B); gui_fill(20, ty+18, 7, 7, COL_W95_FLAG_Y);
     gui_text(34, ty+10, "START", COL_BLACK, COL_W95_FACE);
-    { const char *labels[3] = {"TERMINAL","FILES","NANO"}; int xs[3]={130,258,386}; int ws[3]={120,120,120}; for (i=0;i<3;i++) { gui_bevel_raised(xs[i], ty+4, ws[i], 28); gui_text(xs[i]+10, ty+10, labels[i], COL_BLACK, COL_W95_FACE); } }
+    { const char *labels[3] = {"TERMINAL","FILES","NANO"}; int xs[3]={130,258,386}; int ws[3]={120,120,120}; for (i=0;i<3;i++) { gui_bevel_raised(xs[i], ty+4, ws[i], 28); if (gui_mx >= xs[i] && gui_mx < xs[i]+ws[i] && gui_my >= ty+4 && gui_my < ty+32) gui_fill(xs[i], ty+4, ws[i], 4, COL_GREEN); gui_text(xs[i]+10, ty+10, labels[i], COL_BLACK, COL_W95_FACE); } }
     /* Sunken clock tray, right side. */
     gui_bevel_sunken((int)gui_w-188, ty+4, 180, 28);
     gui_text((int)gui_w-170, ty+10, "FISIXOS", COL_BLACK, COL_W95_FACE);
@@ -311,7 +336,7 @@ static void gui_draw_window_content(void)
         return;
     }
     if (gui_mode==MODE_ALLAPPS) {
-        for (i=0;i<5;i++) { int idx = gui_allapps_page*5+i; if (idx<57) gui_text(wx+24, wy+64+i*36, gui_apps[idx], COL_BLACK, COL_WINDOW); }
+        for (i=0;i<5;i++) { int idx = gui_allapps_page*5+i; if (idx<55) gui_text(wx+24, wy+64+i*36, gui_apps[idx], COL_BLACK, COL_WINDOW); }
         gui_text(wx+24, wy+64+5*36, "NEXT PAGE", COL_BLACK, COL_WINDOW); return;
     }
     if (gui_mode==MODE_TERMINAL || gui_mode==MODE_CALC || gui_mode==MODE_NOTEPAD) {
@@ -342,7 +367,9 @@ uint32_t gui_height(void) { return gui_h; }
 void gui_draw(void)
 {
     if (!gui_ready) return;
-    gui_fill(0,0,(int)gui_w,(int)gui_h,COL_DESKTOP); gui_text(32,32,"FISIXOS",COL_WHITE,COL_DESKTOP); gui_draw_desktop_icons(); gui_draw_window(); gui_draw_taskbar(); gui_draw_cursor();
+    gui_fill(0,0,(int)gui_w,(int)gui_h,COL_DESKTOP); gui_text(32,32,"FISIXOS",COL_WHITE,COL_DESKTOP);
+    if (gui_w > 900) gui_text((int)gui_w-560,32,"ARROWS MOVE ENTER CLICKS",COL_WHITE,COL_DESKTOP);
+    gui_draw_desktop_icons(); gui_draw_window(); gui_draw_taskbar(); gui_draw_cursor();
 }
 void gui_mouse_move(int dx, int dy)
 {
@@ -377,7 +404,7 @@ void gui_trackball_move(int dx, int dy, int buttons)
     int left = buttons & 1, right = buttons & 2, back = buttons & 4, scroll = buttons & 8;
     if (scroll) {
         gui_scroll_accum += dy;
-        if (gui_scroll_accum <= -10) { gui_scroll_accum = 0; if (gui_mode == MODE_ALLAPPS) { gui_allapps_page++; if (gui_allapps_page * 5 >= 57) gui_allapps_page = 0; } gui_serial("[FisixOS] GUI_TRACKBALL_SCROLL\n"); gui_draw(); }
+        if (gui_scroll_accum <= -10) { gui_scroll_accum = 0; if (gui_mode == MODE_ALLAPPS) { gui_allapps_page++; if (gui_allapps_page * 5 >= 55) gui_allapps_page = 0; } gui_serial("[FisixOS] GUI_TRACKBALL_SCROLL\n"); gui_draw(); }
         else if (gui_scroll_accum >= 10) { gui_scroll_accum = 0; if (gui_mode == MODE_ALLAPPS) { gui_allapps_page--; if (gui_allapps_page < 0) gui_allapps_page = 0; } gui_serial("[FisixOS] GUI_TRACKBALL_SCROLL\n"); gui_draw(); }
         gui_prev_left = 0; gui_prev_right = 0; gui_prev_back = 0;
         return;
@@ -425,7 +452,7 @@ static void gui_term_exec(void)
     if (!gui_strlen(gui_input)) return;
     if (gui_input[0]=='H' || gui_input[0]=='h') { gui_term_push("HELP ECHO VER APPS"); }
     else if (gui_input[0]=='V' || gui_input[0]=='v') { gui_term_push("FISIXOS GUI V2"); }
-    else if (gui_input[0]=='A' || gui_input[0]=='a') { gui_term_push("57 APPS IN ALL APPS"); }
+    else if (gui_input[0]=='A' || gui_input[0]=='a') { gui_term_push("55 APPS IN ALL APPS"); }
     else if (gui_input[0]=='E' && gui_input[1]=='C') { gui_term_push(gui_input+5); }
     else if (gui_input[0]=='C' && gui_input[1]=='L') { gui_term_lines=0; }
     else { gui_term_push("UNKNOWN - TRY HELP"); }
@@ -437,7 +464,7 @@ void gui_mouse_click(int left_down)
     gui_prev_left=1; ty=(int)gui_h-36;
     if (gui_start_open && gui_inside(gui_mx,gui_my,4,ty-252,240,252)) {
         int idx=(gui_my-(ty-252)-12)/42;
-        if (idx==0) gui_open_app("TERMINAL"); else if (idx==1) gui_open_app("FILES"); else if (idx==2) gui_open_app("NANO"); else if (idx==3) gui_open_app("CALCULATOR"); else if (idx==4) gui_open_app("ALL APPS"); else if (idx==5) { gui_open_generic("SHUTDOWN","HALTING - USE QEMU","MONITOR QUIT OR","",""); gui_serial("[FisixOS] GUI_CLICK_SHUTDOWN\n"); }
+        if (idx==0) gui_open_app("TERMINAL"); else if (idx==1) gui_open_app("FILES"); else if (idx==2) gui_open_app("NANO"); else if (idx==3) gui_open_app("CALCULATOR"); else if (idx==4) gui_open_app("ALL APPS"); else if (idx==5) { gui_open_generic("SHUTDOWN","HALTING - REAL HW:","ACPI S5 POWER OFF,","VM FALLBACK: HALT",""); gui_serial("[FisixOS] GUI_CLICK_SHUTDOWN\n"); }
         gui_draw(); return;
     }
     gui_start_open=0;
@@ -449,11 +476,11 @@ void gui_mouse_click(int left_down)
         gui_draw(); return;
     }
     /* Desktop icons */
-    { int i; for (i=0;i<17;i++) { int x=16+(i%4)*120; int y=64+(i/4)*110; if (gui_inside(gui_mx,gui_my,x,y,64,64)) { gui_open_app(gui_apps[i]); gui_draw(); return; } } }
+    { int i; for (i=0;i<15;i++) { int x=16+(i%4)*120; int y=64+(i/4)*110; if (gui_inside(gui_mx,gui_my,x,y,64,64)) { gui_open_app(gui_apps[i]); gui_draw(); return; } } }
     wx=160; wy=80; ww=640;
     if (gui_win_visible && gui_inside(gui_mx,gui_my,wx+ww-36,wy+8,24,24)) { gui_win_visible=0; gui_serial("[FisixOS] GUI_CLICK_CLOSE\n"); gui_draw(); return; }
-    if (gui_win_visible && gui_mode==MODE_ALLAPPS && gui_inside(gui_mx,gui_my,wx+24,wy+64+5*36,200,32)) { gui_allapps_page++; if (gui_allapps_page*5>=57) gui_allapps_page=0; gui_draw(); return; }
-    if (gui_win_visible && gui_mode==MODE_ALLAPPS) { int i; for (i=0;i<5;i++) { int idx=gui_allapps_page*5+i; if (idx<57 && gui_inside(gui_mx,gui_my,wx+24,wy+64+i*36,300,32)) { gui_open_app(gui_apps[idx]); gui_draw(); return; } } }
+    if (gui_win_visible && gui_mode==MODE_ALLAPPS && gui_inside(gui_mx,gui_my,wx+24,wy+64+5*36,200,32)) { gui_allapps_page++; if (gui_allapps_page*5>=55) gui_allapps_page=0; gui_draw(); return; }
+    if (gui_win_visible && gui_mode==MODE_ALLAPPS) { int i; for (i=0;i<5;i++) { int idx=gui_allapps_page*5+i; if (idx<55 && gui_inside(gui_mx,gui_my,wx+24,wy+64+i*36,300,32)) { gui_open_app(gui_apps[idx]); gui_draw(); return; } } }
     gui_draw();
 }
 static int gui_mouse_write(uint8_t cmd)
@@ -497,8 +524,43 @@ int gui_poll_input(void)
         if (pkt_idx==0 && !(byte & 0x08)) return 0; pkt[pkt_idx++]=byte; if (pkt_idx<3) return 0; pkt_idx=0;
         { int left=pkt[0]&0x01; int dx=(int8_t)pkt[1]; int dy=(int8_t)pkt[2]; gui_mouse_move(dx,-dy); if (left && !gui_prev_left) gui_mouse_click(1); else if (!left) gui_prev_left=0; else gui_draw(); if (left||dx||dy) gui_draw(); return 1; }
     } else {
-        if (byte==0x01) gui_serial("[FisixOS] GUI_KEY_ESC\n");
-        else if (byte==0x1C) gui_key_enter();
+        /* Extended scancodes: PS/2 arrows are E0 48/50/4B/4D.
+         * The old code ignored E0, so arrows did nothing. */
+        if (byte==0xE0) { gui_e0_prefix=1; return 0; }
+        if (gui_e0_prefix) {
+            int moved=0;
+            gui_e0_prefix=0;
+            if (byte==0x48) { gui_mouse_move(0,-16); moved=1; }
+            else if (byte==0x50) { gui_mouse_move(0,16); moved=1; }
+            else if (byte==0x4B) { gui_mouse_move(-16,0); moved=1; }
+            else if (byte==0x4D) { gui_mouse_move(16,0); moved=1; }
+            if (moved) gui_draw();
+            return 0;
+        }
+        if (byte==0x01) { /* Esc: close window, or START menu, not just log it. */
+            if (gui_start_open) gui_start_open=0;
+            else if (gui_win_visible) gui_win_visible=0;
+            gui_serial("[FisixOS] GUI_KEY_ESC_CLOSE\n"); gui_draw();
+        }
+        else if (byte==0x0F) { /* Tab: jump to next desktop icon, then START, then taskbar. */
+            gui_tab_idx++;
+            if (gui_tab_idx < 15) { int x=16+(gui_tab_idx%4)*120+32; int y=64+(gui_tab_idx/4)*110+32; gui_mx=x; gui_my=y; }
+            else if (gui_tab_idx==15) { gui_mx=60; gui_my=(int)gui_h-20; }
+            else { gui_tab_idx=0; gui_mx=48; gui_my=96; }
+            gui_draw();
+        }
+        else if (byte==0x1C) {
+            /* Enter: click where the cursor is, unless the cursor is
+             * inside a text window (Terminal/Calc/Notepad) and NOT on
+             * its X button - then Enter is text input, as before.
+             * Forced click: reset prev_left first, or a stuck mouse
+             * button state would swallow the keyboard click. */
+            int over_x = gui_win_visible && gui_mx>=160+640-36 && gui_mx<160+640-12 && gui_my>=80+8 && gui_my<80+32;
+            int in_win = gui_win_visible && gui_mx>=160 && gui_mx<160+640 && gui_my>=80 && gui_my<80+320;
+            int text_mode = (gui_mode==MODE_TERMINAL || gui_mode==MODE_CALC || gui_mode==MODE_NOTEPAD);
+            if (text_mode && in_win && !over_x) gui_key_enter();
+            else { gui_prev_left=0; gui_mouse_click(1); gui_prev_left=0; gui_draw(); }
+        }
         else if (byte==0x0E) { if (gui_mode==MODE_TERMINAL||gui_mode==MODE_CALC) { if (gui_input_len>0) gui_input[--gui_input_len]=0; gui_draw(); } else if (gui_mode==MODE_NOTEPAD) { if (gui_note_len>0) gui_note[--gui_note_len]=0; gui_draw(); } }
         else { char c=gui_scancode_to_ascii(byte); if (c) gui_key_ascii(c); }
         return 0;

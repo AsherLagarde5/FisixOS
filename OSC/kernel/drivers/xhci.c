@@ -66,7 +66,7 @@ int xhci_init(xhci_info_t *out)
     maxslots = hcsparams1 & 0xFF;
     ports = (hcsparams1 >> 24) & 0xFF;
     if (ports > 32) ports = 32;
-    if (maxslots == 0) maxslots = 32; /* use full hardware MaxSlots (64 on QEMU) like UEFI does */
+    if (maxslots == 0) maxslots = 32; /* use full hardware MaxSlots (up to 64 on real hardware / QEMU test) like UEFI does */
     /* Halt: RS=0, wait HCHalted (USBSTS bit 0) = 1. */
     cmd = op32(0x00); cmd &= ~1u; op32w(0x00, cmd);
     for (t = 0; t < 5000000u; t++) { if (op32(0x04) & 1u) break; }
@@ -200,21 +200,16 @@ static int cmd_send(uint64_t ptr, uint32_t type, uint32_t slot, uint32_t extra_d
 static uint8_t g_enum_slot = 0;
 static uint32_t g_enum_port = 0;
 static uint32_t g_enum_speed = 0;
-int xhci_enumerate_first(uint8_t *slot_out, uint32_t *portsc_out)
+int xhci_enumerate_port(uint32_t port_in, uint8_t *slot_out, uint32_t *portsc_out)
 {
-    uint32_t ports, i, port = 0, psc = 0, speed = 0, t;
+    uint32_t i, port = port_in, psc = 0, speed = 0, t;
     uint8_t slot = 0, code = 0;
     uint32_t *dcbaa;
     if (!g_bar || !g_op) return 0;
+    if (!port || port > 32) return 0;
     g_dboff = cap32(0x14);
-    /* Find first connected port. */
-    ports = cap32(0x04); ports = (ports >> 24) & 0xFF;
-    if (ports > 32) ports = 32;
-    for (i = 0; i < ports; i++) {
-        psc = op32(0x400 + i * 0x10);
-        if (psc & 1u) { port = i + 1; break; }
-    }
-    if (!port) { x_serial("[xhci] no connected port\n"); return 0; }
+    psc = op32(0x400 + (port - 1) * 0x10);
+    if (!(psc & 1u)) { x_serial("[xhci] port not connected\n"); return 0; }
     if (portsc_out) *portsc_out = psc;
     speed = (psc >> 10) & 0xF;
     /* Reset the port: set PR (bit 4), wait for PR to clear and PED (bit 1). */
@@ -279,6 +274,20 @@ int xhci_enumerate_first(uint8_t *slot_out, uint32_t *portsc_out)
     g_enum_slot = slot; g_enum_port = port; g_enum_speed = speed;
     if (slot_out) *slot_out = slot;
     return 1;
+}
+
+int xhci_enumerate_first(uint8_t *slot_out, uint32_t *portsc_out)
+{
+    uint32_t ports, i;
+    if (!g_bar || !g_op) return 0;
+    ports = cap32(0x04); ports = (ports >> 24) & 0xFF;
+    if (ports > 32) ports = 32;
+    for (i = 0; i < ports; i++) {
+        uint32_t psc = op32(0x400 + i * 0x10);
+        if (psc & 1u) return xhci_enumerate_port(i + 1, slot_out, portsc_out);
+    }
+    x_serial("[xhci] no connected port\n");
+    return 0;
 }
 
 /* ================= HID stage 2 =================
@@ -516,6 +525,55 @@ int xhci_hid_init(xhci_hid_t *out)
     if (out) *out = g_hid;
     return 1;
 }
+/* Mouse scan, 2026-10-30: bare-metal fix. The old kernel only
+   enumerated the FIRST connected USB port as HID. On a real
+   Latitude 5420 booted from a USB hard drive, that first port
+   is usually the boot drive (mass storage, not HID) or a
+   keyboard, so a USB mouse on port 2/3/4 was never even tried
+   and the GUI mouse looked dead, even though a mouse was
+   plugged in. QEMU worked because it usually had only one
+   USB device. This scan tries every other connected port in
+   order, looking specifically for a relative mouse or
+   trackball. If one is found, g_hid becomes that mouse and
+   polling uses it. If none is found, the original HID device
+   is re-enumerated, so tablet/keyboard behaviour is unchanged.
+   This does NOT fix the laptop I2C touchpad - that needs a
+   separate I2C bus + ACPI HID driver, which is not in this
+   build. A USB mouse is the mouse path that works today. */
+int xhci_hid_scan_mouse(xhci_hid_t *out)
+{
+    uint32_t ports, i, orig_port;
+    if (!g_bar || !g_op) return 0;
+    orig_port = g_enum_port;
+    ports = cap32(0x04); ports = (ports >> 24) & 0xFF;
+    if (ports > 32) ports = 32;
+    for (i = 1; i <= ports; i++) {
+        uint32_t psc;
+        xhci_hid_t hid;
+        if (i == orig_port) continue;
+        psc = op32(0x400 + (i - 1) * 0x10);
+        if (!(psc & 1u)) continue;
+        g_enum_slot = 0;
+        if (!xhci_enumerate_port(i, 0, 0)) continue;
+        if (!xhci_hid_init(&hid)) continue;
+        if (hid.kind == XHCI_HID_MOUSE || hid.kind == XHCI_HID_TRACKBALL) {
+            x_serial("[xhci] mouse scan: mouse on port "); x_u32(i); x_serial("\n");
+            if (out) *out = hid;
+            return 1;
+        }
+        /* Not a mouse: keep scanning, do not stop at keyboard/tablet. */
+    }
+    /* No mouse: restore the original HID device, if there was one. */
+    if (orig_port) {
+        xhci_hid_t hid;
+        g_enum_slot = 0;
+        if (xhci_enumerate_port(orig_port, 0, 0) && xhci_hid_init(&hid)) {
+            if (out) *out = hid;
+        }
+    }
+    return 0;
+}
+
 static void int_queue(void)
 {
     uint8_t *trb;
@@ -573,4 +631,133 @@ int xhci_hid_poll(xhci_hid_report_t *rep)
         }
     }
     return 0;
+}
+
+/* ================= Bulk stage (usb_storage.c) ================= */
+static __attribute__((aligned(64))) uint8_t g_bulk_in_ring[64 * 16];
+static __attribute__((aligned(64))) uint8_t g_bulk_out_ring[64 * 16];
+static __attribute__((aligned(4096))) uint8_t g_bulk_cfg_ctx[4096];
+static uint16_t g_bulk_in_tail = 0, g_bulk_out_tail = 0;
+static uint8_t g_bulk_in_cycle = 1, g_bulk_out_cycle = 1;
+static uint8_t g_bulk_slot = 0, g_bulk_in_dci = 0, g_bulk_out_dci = 0;
+static uint8_t g_bulk_in_ep = 0, g_bulk_out_ep = 0;
+static void bulk_queue(uint8_t *ring, uint16_t *tail, uint8_t *cycle, uint64_t ptr, uint32_t len)
+{
+    uint8_t *trb;
+    if (*tail >= 63) {
+        uint8_t *link = ring + 63 * 16;
+        put32b(link + 12, (uint32_t)*cycle | (6u << 10) | (1u << 1));
+        *cycle ^= 1; *tail = 0;
+    }
+    trb = ring + (uintptr_t)*tail * 16;
+    put64b(trb, ptr);
+    put32b(trb + 8, len);
+    put32b(trb + 12, (uint32_t)*cycle | (1u << 10) | (1u << 5));
+    __asm__ volatile ("mfence" ::: "memory");
+    (*tail)++;
+}
+int xhci_bulk_transfer(uint8_t slot, uint8_t ep_addr, uint8_t *buf, uint32_t len, int is_in)
+{
+    uint8_t dci; uint8_t code = 0; uint32_t resid = 0;
+    if (!slot || !buf || len == 0) return -1;
+    if (is_in) {
+        if (ep_addr != g_bulk_in_ep) return -1;
+        dci = g_bulk_in_dci;
+        bulk_queue(g_bulk_in_ring, &g_bulk_in_tail, &g_bulk_in_cycle, (uint64_t)(uintptr_t)buf, len);
+    } else {
+        if (ep_addr != g_bulk_out_ep) return -1;
+        dci = g_bulk_out_dci;
+        bulk_queue(g_bulk_out_ring, &g_bulk_out_tail, &g_bulk_out_cycle, (uint64_t)(uintptr_t)buf, len);
+    }
+    db_write(slot, dci);
+    if (!xfer_wait(slot, dci, &code, &resid)) return -1;
+    if (code != 1 && code != 13) return -1;
+    return (int)len - (int)resid;
+}
+int xhci_bulk_init(uint8_t *slot_out, uint8_t *bulk_in_ep, uint8_t *bulk_out_ep,
+                   uint16_t *bulk_in_mps, uint16_t *bulk_out_mps,
+                   uint8_t *uasp_out, uint16_t *vendor_out, uint16_t *product_out)
+{
+    uint8_t slot = 0, code = 0;
+    uint8_t dev[18]; uint8_t cfg9[9];
+    static uint8_t cfg[512];
+    uint16_t total = 0, cfgval = 0;
+    uint8_t ifnum = 0, in_ep = 0, out_ep = 0, proto = 0;
+    uint16_t in_mps = 0, out_mps = 0; uint8_t in_dci = 0, out_dci = 0;
+    int found_in = 0, found_out = 0, in_msc = 0;
+    uint32_t i;
+    if (!g_bar) return 0;
+    if (!g_enum_slot) {
+        uint32_t psc = 0;
+        if (!xhci_enumerate_first(&slot, &psc)) return 0;
+    }
+    slot = g_enum_slot;
+    if (xhci_control(slot, 0x80, 6, 0x0100, 0, 18, dev, 1) < 18) return 0;
+    if (xhci_control(slot, 0x80, 6, 0x0200, 0, 9, cfg9, 1) < 9) return 0;
+    total = rd16(cfg9 + 2); cfgval = cfg9[5];
+    if (total == 0 || total > sizeof(cfg)) return 0;
+    if (xhci_control(slot, 0x80, 6, 0x0200, 0, total, cfg, 1) < (int)total) return 0;
+    for (i = 0; i + 2 <= total;) {
+        uint8_t blen = cfg[i]; uint8_t btype = cfg[i + 1];
+        if (blen < 2) break;
+        if (btype == 4 && blen >= 9) {
+            ifnum = cfg[i + 2];
+            in_msc = (cfg[i + 5] == 8 && cfg[i + 6] == 6);
+            if (in_msc) proto = cfg[i + 7];
+        } else if (btype == 5 && blen >= 7 && in_msc) {
+            uint8_t addr = cfg[i + 2]; uint8_t attr = cfg[i + 3];
+            if ((attr & 3) == 2) {
+                if ((addr & 0x80) && !found_in) { in_ep = addr; in_mps = rd16(cfg + i + 4); found_in = 1; }
+                else if (!(addr & 0x80) && !found_out) { out_ep = addr; out_mps = rd16(cfg + i + 4); found_out = 1; }
+            }
+        }
+        i += blen;
+    }
+    if (!found_in || !found_out || !in_mps || !out_mps) return 0;
+    in_dci = (uint8_t)(((in_ep & 0x0F) * 2) + 1);
+    out_dci = (uint8_t)((out_ep & 0x0F) * 2);
+    if (xhci_control(slot, 0x00, 9, cfgval, 0, 0, 0, 0) < 0) return 0;
+    for (i = 0; i < sizeof(g_bulk_cfg_ctx); i++) g_bulk_cfg_ctx[i] = 0;
+    for (i = 0; i < sizeof(g_bulk_in_ring); i++) g_bulk_in_ring[i] = 0;
+    for (i = 0; i < sizeof(g_bulk_out_ring); i++) g_bulk_out_ring[i] = 0;
+    {
+        uint8_t *link;
+        link = g_bulk_in_ring + 63 * 16;
+        put64b(link, (uint64_t)(uintptr_t)g_bulk_in_ring); put32b(link + 8, 0); put32b(link + 12, 1u | (6u << 10) | (1u << 1));
+        link = g_bulk_out_ring + 63 * 16;
+        put64b(link, (uint64_t)(uintptr_t)g_bulk_out_ring); put32b(link + 8, 0); put32b(link + 12, 1u | (6u << 10) | (1u << 1));
+    }
+    put32b(g_bulk_cfg_ctx + 0, 0);
+    put32b(g_bulk_cfg_ctx + 4, (1u << 0) | (1u << in_dci) | (1u << out_dci));
+    {
+        uint8_t max_dci = in_dci > out_dci ? in_dci : out_dci;
+        uint32_t off;
+        put32b(g_bulk_cfg_ctx + 32, ((g_enum_speed & 0xF) << 20) | ((uint32_t)max_dci << 27));
+        put32b(g_bulk_cfg_ctx + 32 + 4, (g_enum_port << 16));
+        off = 32 + (uint32_t)in_dci * 32;
+        put32b(g_bulk_cfg_ctx + off, 0);
+        put32b(g_bulk_cfg_ctx + off + 4, (3u << 1) | (6u << 3) | ((uint32_t)in_mps << 16));
+        put64b(g_bulk_cfg_ctx + off + 8, (uint64_t)(uintptr_t)g_bulk_in_ring | 1u);
+        put32b(g_bulk_cfg_ctx + off + 16, in_mps);
+        off = 32 + (uint32_t)out_dci * 32;
+        put32b(g_bulk_cfg_ctx + off, 0);
+        put32b(g_bulk_cfg_ctx + off + 4, (3u << 1) | (2u << 3) | ((uint32_t)out_mps << 16));
+        put64b(g_bulk_cfg_ctx + off + 8, (uint64_t)(uintptr_t)g_bulk_out_ring | 1u);
+        put32b(g_bulk_cfg_ctx + off + 16, out_mps);
+    }
+    if (!cmd_send((uint64_t)(uintptr_t)g_bulk_cfg_ctx, 12, slot, 0, &slot, &code)) return 0;
+    if (code != 1) return 0;
+    g_bulk_slot = g_enum_slot; g_bulk_in_dci = in_dci; g_bulk_out_dci = out_dci;
+    g_bulk_in_ep = in_ep; g_bulk_out_ep = out_ep;
+    g_bulk_in_tail = 0; g_bulk_out_tail = 0; g_bulk_in_cycle = 1; g_bulk_out_cycle = 1;
+    if (slot_out) *slot_out = g_enum_slot;
+    if (bulk_in_ep) *bulk_in_ep = in_ep;
+    if (bulk_out_ep) *bulk_out_ep = out_ep;
+    if (bulk_in_mps) *bulk_in_mps = in_mps;
+    if (bulk_out_mps) *bulk_out_mps = out_mps;
+    if (uasp_out) *uasp_out = (proto == 62) ? 1 : 0;
+    if (vendor_out) *vendor_out = rd16(dev + 8);
+    if (product_out) *product_out = rd16(dev + 10);
+    (void)ifnum;
+    return 1;
 }

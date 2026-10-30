@@ -64,3 +64,18 @@ typedef struct {
 } xhci_hid_report_t;
 int xhci_hid_init(xhci_hid_t *out);
 int xhci_hid_poll(xhci_hid_report_t *rep);
+int xhci_hid_scan_mouse(xhci_hid_t *out);
+int xhci_enumerate_port(uint32_t port_in, uint8_t *slot_out, uint32_t *portsc_out);
+/* xHCI bulk stage (for usb_storage.c): enumerate the first device,
+   parse its config for a Mass Storage interface (class 08, subclass
+   06, protocol 50 BOT or 62 UASP), SET_CONFIGURATION, and Configure
+   Endpoint for its bulk IN and bulk OUT endpoints. Returns 1 on
+   success, filling slot/endpoint/MPS/uasp/vendor/product. UASP is
+   reported only; bulk transfers still use BOT TRBs.
+   xhci_bulk_transfer() queues one Normal TRB and waits for its
+   Transfer Event; returns bytes transferred or -1. Must run after
+   xhci_init(). */
+int xhci_bulk_init(uint8_t *slot_out, uint8_t *bulk_in_ep, uint8_t *bulk_out_ep,
+                   uint16_t *bulk_in_mps, uint16_t *bulk_out_mps,
+                   uint8_t *uasp_out, uint16_t *vendor_out, uint16_t *product_out);
+int xhci_bulk_transfer(uint8_t slot, uint8_t ep_addr, uint8_t *buf, uint32_t len, int is_in);

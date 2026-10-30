@@ -15,11 +15,14 @@
 #include "drivers/latitude5420.h"
 #include "drivers/wwan.h"
 #include "drivers/generic.h"
+#include "drivers/audio.h"
 #include "drivers/e1000.h"
 #include "drivers/net.h"
 #include "drivers/syscall.h"
 #include "drivers/proc.h"
 #include "drivers/gui.h"
+#include "drivers/generic_boot.h"
+#include "drivers/i2c_hid.h"
 
 /* Serial debug output on COM1 (0x3F8), for early kernel bring-up. */
 static void debug_outb(uint16_t port, uint8_t value) {
@@ -107,6 +110,7 @@ static void debug_init_serial(void) {
 /* --- MWAHAHAHA IM A DINOSAUR --- */
 
 static int g_hid_ready = 0;
+static int g_i2c_ready = 0;
 void kernel_startup(const kernel_boot_info_t *boot_info)
 {
     __asm__ volatile ("cli");
@@ -168,6 +172,44 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
     debug_print("[FisixOS] Disabling PIC...\n");
     pic_disable();
     debug_print("[FisixOS] PIC disabled\n");
+
+    /* Generic-driver boot pass (Windows Basic Driver equivalent).
+       Order: 1) generic detection here, first, so any PC can boot;
+       2) specific drivers below (Latitude, NVMe, xHCI, e1000, AMD)
+       as optimizations on top; 3) UEFI firmware fallback (GOP,
+       ESP/FAT, serial text) if both fail. Non-essential failures
+       (network, audio) never halt boot. This block only detects
+       + PS/2; it does NOT re-init NVMe/xHCI/e1000. */
+    {
+        generic_boot_t gb;
+        generic_boot_init(boot_info->framebuffer_base, boot_info->framebuffer_width,
+                          boot_info->framebuffer_height, boot_info->framebuffer_pitch, &gb);
+        debug_print("[FisixOS] generic: display mode=");
+        debug_print_u32((uint32_t)gb.display.mode);
+        debug_print(" storage=");
+        debug_print(generic_storage_kind_name(gb.storage.kind));
+        debug_print(" input_ps2=");
+        debug_print_u32((uint32_t)gb.input.ps2);
+        debug_print(" net_found=");
+        debug_print_u32((uint32_t)gb.network.found);
+        debug_print(" audio_hda=");
+        debug_print_u32((uint32_t)gb.audio.hda_found);
+        debug_print(" cpu_vendor=");
+        debug_print_u32((uint32_t)gb.cpu.vendor);
+        debug_print(" pci_count=");
+        debug_print_u32((uint32_t)gb.chipset.pci_count);
+        debug_print(" wifi_found=");
+        debug_print_u32((uint32_t)gb.wifi.found);
+        debug_print(" wifi_status=");
+        debug_print(generic_wifi_status_name(gb.wifi.status));
+        debug_print(" wifi_cnvi_hint=");
+        debug_print_u32((uint32_t)gb.wifi.cnvi_hint);
+        debug_print(" usb_controller=");
+        debug_print_u32((uint32_t)gb.usb.controller_present);
+        debug_print(" essential_ok=");
+        debug_print_u32((uint32_t)gb.essential_ok);
+        debug_print(" (generic first, specific drivers next, UEFI fallback last)\n");
+    }
 
     /* Checkpoint 5: IDT */
     debug_print("[FisixOS] Calling idt_init...\n");
@@ -382,8 +424,42 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
                             debug_print("\n");
                             if (hid.kind == XHCI_HID_TRACKBALL) debug_print("[FisixOS] boot: xHCI HID TRACKBALL (Logitech trackball, direct support)\n");
                             g_hid_ready = 1;
+                            /* Mouse scan: if the first HID is not a mouse
+                             * (keyboard/tablet, or the boot drive took
+                             * port 1), a USB mouse on another port was
+                             * previously never tried. Scan for it now. */
+                            if (hid.kind != XHCI_HID_MOUSE && hid.kind != XHCI_HID_TRACKBALL) {
+                                xhci_hid_t mhid;
+                                if (xhci_hid_scan_mouse(&mhid)) {
+                                    debug_print("[FisixOS] boot: xHCI mouse scan found mouse, vendor ");
+                                    debug_print_hex16(mhid.vendor_id);
+                                    debug_print(", product ");
+                                    debug_print_hex16(mhid.product_id);
+                                    debug_print(", kind ");
+                                    debug_print_u32((uint32_t)mhid.kind);
+                                    debug_print("\n");
+                                    g_hid_ready = 1;
+                                } else {
+                                    debug_print("[FisixOS] boot: xHCI mouse scan: no USB mouse on other ports, keeping first HID\n");
+                                }
+                            }
                         } else {
-                            debug_print("[FisixOS] boot: xHCI HID init failed (not a HID device, or endpoint config failed)\n");
+                            debug_print("[FisixOS] boot: xHCI HID init failed (not a HID device, or endpoint config failed), trying mouse scan on other ports\n");
+                            {
+                                xhci_hid_t mhid;
+                                if (xhci_hid_scan_mouse(&mhid)) {
+                                    debug_print("[FisixOS] boot: xHCI mouse scan found mouse, vendor ");
+                                    debug_print_hex16(mhid.vendor_id);
+                                    debug_print(", product ");
+                                    debug_print_hex16(mhid.product_id);
+                                    debug_print(", kind ");
+                                    debug_print_u32((uint32_t)mhid.kind);
+                                    debug_print("\n");
+                                    g_hid_ready = 1;
+                                } else {
+                                    debug_print("[FisixOS] boot: xHCI mouse scan: no USB mouse found\n");
+                                }
+                            }
                         }
                     }
                 } else {
@@ -399,6 +475,11 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
     }
     {
         generic_init_all();
+        /* Audio, 2026-10-29: PC speaker beep, not HDA. See drivers/audio.h. */
+        audio_init();
+        debug_print("[FisixOS] audio: PC speaker ready\n");
+        audio_beep(660, 120);
+        audio_beep(880, 120);
         e1000_init_kernel();
         net_init();
     }
@@ -419,6 +500,32 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
         debug_print(" ethernet="); debug_print_u32((uint32_t)chk.ethernet);
         debug_print(" wifi_cnvi=0 (not claimed) smbios="); debug_print_u32((uint32_t)chk.smbios);
         debug_print("\n");
+    }
+
+    {
+        /* Generic I2C HID, 2026-10-30: built-in laptop trackpads
+         * and touchscreens, not USB, not PS/2. Bounded probe:
+         * if no I2C HID device is found, this just logs and the
+         * kernel continues with PS/2 / USB / keyboard. */
+        i2c_hid_info_t ii;
+        if (i2c_hid_init(&ii)) {
+            debug_print("[FisixOS] boot: I2C HID OK, vendor ");
+            debug_print_hex16(ii.vendor_id);
+            debug_print(", product ");
+            debug_print_hex16(ii.product_id);
+            debug_print(", slave ");
+            debug_print_u32(ii.slave_addr);
+            debug_print(", kind ");
+            debug_print_u32((uint32_t)ii.kind);
+            debug_print(", max ");
+            debug_print_u32(ii.logical_max_x);
+            debug_print("x");
+            debug_print_u32(ii.logical_max_y);
+            debug_print("\n");
+            g_i2c_ready = 1;
+        } else {
+            debug_print("[FisixOS] boot: I2C HID not found (no Serial IO I2C HID device, or probe failed - keyboard/USB still work)\n");
+        }
     }
 
     debug_print("[FisixOS] Kernel early setup complete.\n");
@@ -459,6 +566,21 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
                                     gui_touch_set(sx, sy, rep.down);
                                 }
                             }
+                        }
+                    }
+                }
+                if (g_i2c_ready) {
+                    i2c_hid_report_t irep;
+                    if (i2c_hid_poll(&irep) > 0) {
+                        if (irep.kind == 1) {
+                            gui_usb_move(irep.dx, irep.dy, irep.buttons);
+                        } else {
+                            uint32_t mx = irep.logical_max_x ? irep.logical_max_x : 32767;
+                            uint32_t my = irep.logical_max_y ? irep.logical_max_y : 32767;
+                            int sx = (int)((uint32_t)irep.abs_x * gui_width() / mx);
+                            int sy = (int)((uint32_t)irep.abs_y * gui_height() / my);
+                            touchscreen_update_absolute(sx, sy, irep.down);
+                            gui_touch_set(sx, sy, irep.down);
                         }
                     }
                 }
