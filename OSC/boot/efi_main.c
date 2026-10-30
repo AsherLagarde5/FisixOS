@@ -1,4 +1,5 @@
 #include "efi.h"
+#include "logo_embedded.h"
 #include "eosfs.h"
 #include "memory.h"
 #include "accounts.h"
@@ -617,6 +618,40 @@ static void terminal_write_ascii_line(const char *text)
     terminal_write((const CHAR16[]){ '\r', '\n', 0 });
 }
 
+/* Boot logo splash, 2026-10-30: draw Asher's white logo to GOP
+   before the menu, like Windows does with its logo - it clears
+   the vendor logo (boot_clear_screen) and draws its own, deep
+   in boot, before any text. Size: width/6 clamped 250-400,
+   never upscaled, centred, box-average downscale, black bg.
+   Then Stall 2 seconds, then the menu clears it again. */
+static void boot_draw_logo(void)
+{
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = 0;
+    EFI_STATUS st;
+    uint32_t w, h, pitch, size, x0, y0, dx, dy;
+    uint32_t *fb;
+    if (!gBS || !gBS->LocateProtocol) return;
+    st = gBS->LocateProtocol(&EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, 0, (void **)&gop);
+    if (EFI_ERROR(st) || !gop || !gop->Mode || !gop->Mode->FrameBufferBase || !gop->Mode->Info) return;
+    w = gop->Mode->Info->HorizontalResolution; h = gop->Mode->Info->VerticalResolution; pitch = gop->Mode->Info->PixelsPerScanLine;
+    if (w < 20 || h < 20 || pitch < w) return;
+    fb = (uint32_t *)(uintptr_t)gop->Mode->FrameBufferBase;
+    size = w / 6; if (size < 250) size = 250; if (size > 400) size = 400;
+    if (size > w - 20) size = w - 20; if (size > h - 20) size = h - 20; if (size < 1) return;
+    x0 = (w - size) / 2; y0 = (h - size) / 2;
+    for (dy = 0; dy < h; dy++) { uint32_t x; for (x = 0; x < w; x++) fb[dy * pitch + x] = 0; }
+    for (dy = 0; dy < size; dy++) {
+        uint32_t sy0 = dy * 400 / size, sy1 = (dy + 1) * 400 / size, sy;
+        if (sy1 <= sy0) sy1 = sy0 + 1;
+        for (dx = 0; dx < size; dx++) {
+            uint32_t sx0 = dx * 400 / size, sx1 = (dx + 1) * 400 / size, sx, sum = 0, cnt = 0;
+            if (sx1 <= sx0) sx1 = sx0 + 1;
+            for (sy = sy0; sy < sy1; sy++) for (sx = sx0; sx < sx1; sx++) { sum += fisix_boot_logo[sy * 400 + sx]; cnt++; }
+            if (cnt) { uint32_t g = sum / cnt; fb[(y0 + dy) * pitch + (x0 + dx)] = (g << 16) | (g << 8) | g; }
+        }
+    }
+    if (gBS->Stall) { typedef EFI_STATUS (EFIAPI *fisix_stall_t)(UINTN Microseconds); ((fisix_stall_t)gBS->Stall)(2000000); }
+}
 /* Clear the screen on every boot, so the firmware vendor logo does
    not stay behind FisixOS text. ConOut ClearScreen clears the text
    screen; filling the GOP framebuffer black clears a graphics logo
@@ -2240,11 +2275,64 @@ static void boot_chainload(int efi_index)
     gBS->FreePool(buf);
     (void)st;
 }
+/* 2026-10-30 auto-boot fix: the GUI is the kernel (kernel_startup
+   -> GUI loop), not the loader. Before this, every normal boot
+   stopped in the loader shell and waited for the user to type
+   "gui" to load the kernel at all, which made it look like
+   booting required a command, and like "gui" was rebooting.
+   Now: after login, a normal Installed / Live boot goes
+   straight to the kernel/GUI. Only an explicit "0) terminal"
+   menu choice stays in the loader shell, where "gui" still
+   works, and the Installer menu entry is unchanged. */
+static int fisix_terminal_mode = 0;
+static int fisix_no_wifi = 0;
+static int fisix_ram_mode = 0;
+/* RAM Mode memory check + copy, 2026-10-30. Runs before
+ * ExitBootServices, so it can still use UEFI file + memory
+ * services. Check: at least 512 MB conventional+loader memory,
+ * otherwise refuse and return to the menu. Copy: read each
+ * .fse from the boot drive root into RAM at 0x500000+, so
+ * the whole OS payload is in RAM before the kernel starts.
+ * The kernel itself is loaded to RAM by efi_load_kernel, and
+ * the GUI's .fse copies are embedded in that kernel, so
+ * after the GUI appears the drive can be removed and the OS
+ * keeps running until reboot, when RAM is cleared. */
+static int fisix_ram_check_and_copy(void)
+{
+    static uint8_t mm_buf[128 * 1024];
+    size_t mm_size = sizeof(mm_buf), map_key = 0, desc_size = 0; uint32_t desc_ver = 0; EFI_STATUS st;
+    uint64_t total = 0; uint8_t *cur; size_t i;
+    if (!gBS || !gBS->GetMemoryMap) return 0;
+    st = ((EFI_GET_MEMORY_MAP)gBS->GetMemoryMap)(&mm_size, (EFI_MEMORY_DESCRIPTOR *)mm_buf, &map_key, &desc_size, &desc_ver);
+    if (EFI_ERROR(st) || desc_size == 0) { terminal_write_ascii_line("RAM MODE: COULD NOT READ MEMORY MAP"); return 0; }
+    cur = mm_buf;
+    for (i = 0; i < mm_size / desc_size; i++) { EFI_MEMORY_DESCRIPTOR *d = (EFI_MEMORY_DESCRIPTOR *)cur; if (d->Type == EfiConventionalMemory || d->Type == EfiLoaderCode || d->Type == EfiLoaderData || d->Type == EfiBootServicesCode || d->Type == EfiBootServicesData) total += d->NumberOfPages * 4096ULL; cur += desc_size; }
+    if (total < 512ULL * 1024ULL * 1024ULL) { terminal_write_ascii_line("RAM MODE: NOT ENOUGH MEMORY - NEED 512 MB"); serial_mark("RAM_MODE_TOO_LITTLE_RAM"); return 0; }
+    /* Copy .fse files to RAM. Each file is opened from the boot
+     * drive root (they are also in SYSTEM/APPS). A missing file
+     * is skipped, not fatal, because the GUI also has embedded
+     * copies in the kernel. */
+    {
+        static const CHAR16 nb[] = { '\\','b','r','o','w','s','y','.','f','s','e',0 }; static const CHAR16 nc[] = { '\\','c','l','i','p','o','n','g','.','f','s','e',0 }; static const CHAR16 nn[] = { '\\','n','a','n','o','.','f','s','e',0 }; static const CHAR16 np[] = { '\\','p','a','t','h','i','f','y','.','f','s','e',0 }; static const CHAR16 nr[] = { '\\','r','e','t','e','r','m','.','f','s','e',0 }; static const CHAR16 nz[] = { '\\','z','.','f','s','e',0 };
+        const CHAR16 *names[6] = { nb, nc, nn, np, nr, nz };
+        static const char *anames[6] = { "browsy", "clipong", "nano", "pathify", "reterm", "z" };
+        uint64_t ram_base = 0x500000ULL; int k;
+        for (k = 0; k < 6; k++) {
+            EFI_FILE_PROTOCOL *f = 0; uint8_t *dst = (uint8_t *)(uintptr_t)ram_base; UINTN total_read = 0;
+            if (!terminal_open_file(names[k], EFI_FILE_MODE_READ, 0, &f)) continue;
+            for (;;) { UINTN chunk = 4096; EFI_STATUS rs = f->Read(f, &chunk, dst + total_read); if (EFI_ERROR(rs) || chunk == 0) break; total_read += chunk; }
+            f->Close(f);
+            if (total_read > 0) { terminal_write_ascii("RAM COPY: "); terminal_write_ascii(anames[k]); terminal_write_ascii_line(" IN RAM"); ram_base += ((total_read + 4095) / 4096) * 4096; }
+        }
+    }
+    serial_mark("RAM_MODE_COPY_DONE");
+    return 1;
+}
 static int boot_run_menu(void)
 {
     for (;;) {
         int installed[16], installed_count = 0, other[32], other_count = 0;
-        int i, live_num, install_num, choice_num;
+        int i, live_num, install_num, ram_num, choice_num;
         CHAR16 line[32];
         uint64_t choice = 0;
         boot_clear_screen();
@@ -2303,6 +2391,9 @@ static int boot_run_menu(void)
             install_write_num("", (uint64_t)install_num, "");
             terminal_write_ascii_line("FisixOS - Installer (copy this FisixOS to a disk)");
 #endif
+            ram_num = n++;
+            install_write_num("", (uint64_t)ram_num, "");
+            terminal_write_ascii_line("FisixOS - RAM Mode (complete RAM, remove drive, gone on reboot)");
             for (i = 0; i < other_count; i++) {
                 install_write_num("", (uint64_t)n, "");
                 terminal_write_ascii("Boot ");
@@ -2312,7 +2403,8 @@ static int boot_run_menu(void)
                 terminal_write_ascii_line(")");
                 n++;
             }
-            terminal_write_ascii_line("  0) FisixOS terminal (normal boot)");
+            terminal_write_ascii_line("  0) FisixOS terminal (shell, type gui to start GUI)");
+        terminal_write_ascii_line("  Enter / Installed / Live boot straight to the GUI after login.");
 #if !FISIX_INSTALLED_BUILD
             if (installed_count == 0) terminal_write_ascii_line("  (No installed FisixOS disk found yet - use Installer, then reboot.)");
 #endif
@@ -2323,10 +2415,12 @@ static int boot_run_menu(void)
             if (installed_count > 0) {
                 fisix_selected_fs = boot_fss[installed[0]].fs;
                 fisix_live_boot = 0;
+                fisix_terminal_mode = 0;
                 serial_mark("BOOT_MODE_INSTALLED");
             } else {
                 fisix_selected_fs = (boot_boot_fs >= 0) ? boot_fss[boot_boot_fs].fs : 0;
                 fisix_live_boot = 0;
+                fisix_terminal_mode = 1;
                 serial_mark("BOOT_MODE_TERMINAL");
             }
             boot_clear_screen();
@@ -2337,6 +2431,7 @@ static int boot_run_menu(void)
         if (choice_num == 0) {
             fisix_selected_fs = (boot_boot_fs >= 0) ? boot_fss[boot_boot_fs].fs : 0;
             fisix_live_boot = 0;
+            fisix_terminal_mode = 1;
             serial_mark("BOOT_MODE_TERMINAL");
             boot_clear_screen();
             return 0;
@@ -2344,6 +2439,7 @@ static int boot_run_menu(void)
         if (choice_num >= 1 && choice_num <= installed_count) {
             fisix_selected_fs = boot_fss[installed[choice_num - 1]].fs;
             fisix_live_boot = 0;
+            fisix_terminal_mode = 0;
             serial_mark("BOOT_MODE_INSTALLED");
             boot_clear_screen();
             return 0;
@@ -2351,6 +2447,7 @@ static int boot_run_menu(void)
         if (choice_num == live_num) {
             fisix_selected_fs = (boot_boot_fs >= 0) ? boot_fss[boot_boot_fs].fs : 0;
             fisix_live_boot = 1;
+            fisix_terminal_mode = 0;
             serial_mark("BOOT_MODE_LIVE");
             boot_clear_screen();
             return 0;
@@ -2365,17 +2462,69 @@ static int boot_run_menu(void)
             terminal_read_line(line, 32);
             continue;
         }
+        if (choice_num == ram_num) {
+            fisix_selected_fs = (boot_boot_fs >= 0) ? boot_fss[boot_boot_fs].fs : 0;
+            if (!fisix_ram_check_and_copy()) { terminal_write_ascii_line("Press Enter to return to the bootloader menu."); terminal_read_line(line, 32); continue; }
+            fisix_live_boot = 1;
+            fisix_ram_mode = 1;
+            fisix_terminal_mode = 0;
+            serial_mark("BOOT_MODE_RAM");
+            boot_clear_screen();
+            return 0;
+        }
         {
             /* First "other" number: installed + live + installer (if
                present). On an installed build there is no installer
                number, so other entries start one lower. */
-            int other_idx = choice_num - (installed_count + 2 + (install_num > 0 ? 1 : 0));
+            int other_idx = choice_num - (installed_count + 3 + (install_num > 0 ? 1 : 0));
             if (other_idx >= 0 && other_idx < other_count) {
                 boot_chainload(other[other_idx]);
                 terminal_write_ascii_line("Press Enter to return to the bootloader menu.");
                 terminal_read_line(line, 32);
                 continue;
             }
+        }
+        terminal_write_ascii_line("Invalid choice.");
+    }
+}
+
+/* 2026-10-30, Asher: after entering your password, ask how
+   to start - for now just two options:
+     1) With Wi-Fi    (generic Wi-Fi detect runs, GEN 8)
+     2) Without Wi-Fi (Wi-Fi detect is skipped entirely,
+                       so a GEN 8 hang cannot block boot)
+   Enter defaults to With Wi-Fi. The choice is passed to
+   the kernel in boot_info.no_wifi, and it sticks even in
+   terminal mode, because the kernel only loads after the
+   shell exits via gui/exit. */
+static void terminal_ask_wifi_mode(void)
+{
+    for (;;) {
+        CHAR16 line[32];
+        uint64_t choice = 0;
+        terminal_write_ascii_line("");
+        terminal_write_ascii_line("How do you want to start FisixOS?");
+        terminal_write_ascii_line("  1) With Wi-Fi");
+        terminal_write_ascii_line("  2) Without Wi-Fi");
+        terminal_write_ascii("Choice (Enter = With Wi-Fi): ");
+        if (terminal_read_line(line, 32) == 0 || line[0] == 0) {
+            fisix_no_wifi = 0;
+            terminal_write_ascii_line("Starting with Wi-Fi.");
+            serial_mark("BOOT_WIFI_ON");
+            return;
+        }
+        if (!install_parse_u64(line, &choice)) { terminal_write_ascii_line("Invalid choice."); continue; }
+        if (choice == 1) {
+            fisix_no_wifi = 0;
+            terminal_write_ascii_line("Starting with Wi-Fi.");
+            serial_mark("BOOT_WIFI_ON");
+            return;
+        }
+        if (choice == 2) {
+            fisix_no_wifi = 1;
+            terminal_write_ascii_line("Starting without Wi-Fi. Wi-Fi detect will be skipped.");
+            serial_mark("BOOT_WIFI_OFF");
+            return;
         }
         terminal_write_ascii_line("Invalid choice.");
     }
@@ -2390,6 +2539,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     serial_mark("EFI_MAIN_GBS_SET");
     boot_clear_screen();
     serial_mark("BOOT_CLEAR_OK");
+    boot_draw_logo();
+    serial_mark("BOOT_LOGO_OK");
     boot_run_menu();
 
     eosfs_init();
@@ -2405,10 +2556,20 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     }
     terminal_run_batch();
     terminal_login();
-    terminal_run_shell();
+    terminal_ask_wifi_mode();
+    if (fisix_terminal_mode) {
+        terminal_run_shell();
+    } else {
+        terminal_write_line((const CHAR16[]){ 'B','o','o','t','i','n','g',' ','t','o',' ','t','h','e',' ','F','i','s','i','x','O','S',' ','G','U','I','.','.','.',0 });
+        serial_mark("AUTO_BOOT_GUI");
+    }
 
-    kernel_boot_info_t boot_info = { 0, 0, 0, 0, 0, 0, 0 };
+    kernel_boot_info_t boot_info = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    terminal_write_line((const CHAR16[]){ 'G','U','I',' ','S','T','E','P',':',' ','L','O','A','D','I','N','G',' ','K','E','R','N','E','L',0 });
+    serial_mark("GUI_STEP_LOAD_KERNEL");
     efi_fill_driver_info(&boot_info);
+    boot_info.no_wifi = (uint32_t)fisix_no_wifi;
+    boot_info.ram_mode = (uint32_t)fisix_ram_mode;
     if (efi_load_kernel() != EFI_SUCCESS || efi_leave_boot_services(&boot_info) != EFI_SUCCESS) {
         terminal_write_line((const CHAR16[]){ 'f','a','i','l','e','d',' ','t','o',' ','s','t','a','r','t',' ','k','e','r','n','e','l',0 });
         return EFI_LOAD_ERROR;

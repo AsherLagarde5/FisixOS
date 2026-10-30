@@ -111,6 +111,21 @@ static void debug_init_serial(void) {
 
 static int g_hid_ready = 0;
 static int g_i2c_ready = 0;
+/* On-screen stage debug, 2026-10-30: serial debug is invisible on
+ * a laptop with no serial capture, so a hang between "gui" and
+ * the GUI drawing just looks stuck. If a GOP framebuffer is
+ * present, kernel_startup draws each stage name to it as it
+ * starts that stage. The last line on screen is the stage that
+ * started and never finished - report that line. If the screen
+ * fills, it wraps to the top and clears, so the last stage is
+ * always near the top. Also mirrored to serial. */
+static void fb_stage(const char *s)
+{
+    debug_print("[FisixOS] STAGE: ");
+    debug_print(s);
+    debug_print("\n");
+    if (gui_is_ready()) gui_debug_line(s);
+}
 void kernel_startup(const kernel_boot_info_t *boot_info)
 {
     __asm__ volatile ("cli");
@@ -124,6 +139,18 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
     }
 
     debug_print("[FisixOS] Boot info OK\n");
+
+    /* Early GUI init, for on-screen stages only: this just points
+     * the GUI at the GOP framebuffer and clears it. The real GUI
+     * draw at the end re-inits and redraws over this, so the look
+     * is unchanged if boot reaches the GUI. If boot hangs before
+     * that, the stage lines stay on screen. */
+    if (boot_info->framebuffer_base) {
+        gui_init(boot_info->framebuffer_base, boot_info->framebuffer_width, boot_info->framebuffer_height, boot_info->framebuffer_pitch);
+        gui_debug_clear();
+        gui_debug_text(32, 12, "FISIXOS BOOT DEBUG - LAST LINE = STUCK STAGE");
+    }
+    fb_stage("KERNEL START");
 
     /* Checkpoint 1: Memory bytes */
     debug_print("[FisixOS] memory_bytes = ");
@@ -139,11 +166,13 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
     debug_print("\n");
 
     /* Checkpoint 2: memory_init */
+    fb_stage("MEMORY INIT");
     debug_print("[FisixOS] Calling memory_init...\n");
     memory_init();
     debug_print("[FisixOS] memory_init OK\n");
 
     /* Checkpoint 3: acpi_init */
+    fb_stage("ACPI INIT");
     debug_print("[FisixOS] Calling acpi_init...\n");
     acpi_init();
     debug_print("[FisixOS] acpi_init OK\n");
@@ -182,8 +211,11 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
        + PS/2; it does NOT re-init NVMe/xHCI/e1000. */
     {
         generic_boot_t gb;
+        fb_stage("GENERIC BOOT");
         generic_boot_init(boot_info->framebuffer_base, boot_info->framebuffer_width,
-                          boot_info->framebuffer_height, boot_info->framebuffer_pitch, &gb);
+                          boot_info->framebuffer_height, boot_info->framebuffer_pitch, &gb,
+                          boot_info->no_wifi ? 1 : 0);
+        if (boot_info->ram_mode) fb_stage("RAM MODE - REMOVE DRIVE OK");
         debug_print("[FisixOS] generic: display mode=");
         debug_print_u32((uint32_t)gb.display.mode);
         debug_print(" storage=");
@@ -212,6 +244,7 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
     }
 
     /* Checkpoint 5: IDT */
+    fb_stage("IDT INIT");
     debug_print("[FisixOS] Calling idt_init...\n");
     idt_init();
     debug_print("[FisixOS] idt_init OK\n");
@@ -229,6 +262,7 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
        a future driver knows exactly what hardware it has to talk to.
        Subclass 0x00 = Ethernet, 0x80 and others are often wireless /
        other network controllers, depending on the vendor. */
+    fb_stage("PCI NET DETECT");
     debug_print("[FisixOS] Calling pci network detection...\n");
     {
         pci_device_t net;
@@ -314,6 +348,7 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
     } else {
         debug_print("[FisixOS] driver: no SMBIOS table found by loader\n");
     }
+    fb_stage("DRIVERS APIC PCI");
     touchscreen_init();
     debug_print("[FisixOS] driver: touchscreen = USB HID digitizer via xHCI when present; laptop HID-over-I2C still needs an I2C bus driver\n");
 
@@ -359,10 +394,12 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
             debug_print("\n");
         }
     }
+    fb_stage("PS2 KEYBOARD");
     if (ps2kbd_init()) debug_print("[FisixOS] boot: PS/2 keyboard controller OK\n");
     else debug_print("[FisixOS] boot: PS/2 keyboard controller NOT present / test failed (timeout, not a hang)\n");
     {
         nvme_info_t nv;
+        fb_stage("NVME");
         if (nvme_init(&nv)) {
             uint8_t lba0[512];
             debug_print("[FisixOS] boot: NVMe WORKING, model = ");
@@ -392,6 +429,7 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
     }
     {
         xhci_info_t xh;
+        fb_stage("XHCI");
         if (xhci_init(&xh)) {
             debug_print("[FisixOS] boot: xHCI RUNNING, version ");
             debug_print_hex16(xh.version);
@@ -471,6 +509,7 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
         }
     }
     {
+        fb_stage("WWAN GENERIC AUDIO NET");
         wwan_init();
     }
     {
@@ -485,6 +524,7 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
     }
     {
         latitude5420_boot_t chk;
+        fb_stage("LATITUDE CHECK");
         latitude5420_check(&chk);
         chk.gop = boot_info->framebuffer_base != 0;
         debug_print("[FisixOS] boot: Latitude 5420 checklist: tiger_lake=");
@@ -508,6 +548,7 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
          * if no I2C HID device is found, this just logs and the
          * kernel continues with PS/2 / USB / keyboard. */
         i2c_hid_info_t ii;
+        fb_stage("I2C HID PROBE");
         if (i2c_hid_init(&ii)) {
             debug_print("[FisixOS] boot: I2C HID OK, vendor ");
             debug_print_hex16(ii.vendor_id);
@@ -528,10 +569,14 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
         }
     }
 
+    fb_stage("EARLY SETUP DONE");
     debug_print("[FisixOS] Kernel early setup complete.\n");
     if (boot_info->framebuffer_base) {
+        fb_stage("GUI INIT");
         gui_init(boot_info->framebuffer_base, boot_info->framebuffer_width, boot_info->framebuffer_height, boot_info->framebuffer_pitch);
         if (gui_is_ready()) {
+            fb_stage("GUI DRAW");
+            gui_show_boot_logo();
             gui_draw();
             debug_print("[FisixOS] GUI_START taskbar+window drawn\n");
             while (1) {

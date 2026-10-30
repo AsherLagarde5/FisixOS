@@ -8,4 +8,6 @@
    no user stack, and no preemption. That is the next stage. */
 int proc_run_fse(const uint8_t *file, uint32_t file_len);
 int proc_run_fse_at(const uint8_t *file, uint32_t file_len, uint64_t load_addr);
+void proc_set_gui_print(void (*cb)(const char *s));
+void proc_set_gui_read_key(int (*cb)(void));
 #endif
