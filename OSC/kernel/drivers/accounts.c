@@ -267,7 +267,9 @@ int accounts_add(const CHAR16 *name, const CHAR16 *password)
 
 int accounts_change_password(const CHAR16 *old_password, const CHAR16 *new_password)
 {
-    if (current_account < 0 || !equal_str(accounts[current_account].password, old_password) || !valid_str(new_password))
+    /* current_account is only ever a login index, but never index past
+       the live accounts: a stale index must not read out of bounds. */
+    if (current_account < 0 || current_account >= account_count || !equal_str(accounts[current_account].password, old_password) || !valid_str(new_password))
         return 0;
     copy_str(accounts[current_account].password, new_password);
     return accounts_save();
@@ -275,12 +277,14 @@ int accounts_change_password(const CHAR16 *old_password, const CHAR16 *new_passw
 
 int accounts_is_admin(void)
 {
-    return current_account >= 0 && accounts[current_account].admin;
+    /* Same stale-index guard as accounts_change_password(). */
+    return current_account >= 0 && current_account < account_count && accounts[current_account].admin;
 }
 
 const CHAR16 *accounts_current_user(void)
 {
-    return current_account >= 0 ? accounts[current_account].name : nobody;
+    /* Same stale-index guard: a stale index falls back to "nobody". */
+    return current_account >= 0 && current_account < account_count ? accounts[current_account].name : nobody;
 }
 
 int accounts_count(void)
