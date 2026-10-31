@@ -252,7 +252,8 @@ int accounts_login(const CHAR16 *name, const CHAR16 *password)
 
 int accounts_add(const CHAR16 *name, const CHAR16 *password)
 {
-    if (!accounts_is_admin() || !valid_str(name) || !valid_str(password) || account_count >= FISIX_MAX_USERS)
+    /* Lower bound too: a negative count would index before the array. */
+    if (!accounts_is_admin() || !valid_str(name) || !valid_str(password) || account_count < 0 || account_count >= FISIX_MAX_USERS)
         return 0;
     for (int i = 0; i < account_count; ++i) {
         if (equal_str(accounts[i].name, name))
