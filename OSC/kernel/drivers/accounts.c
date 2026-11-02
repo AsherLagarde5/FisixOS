@@ -144,8 +144,9 @@ static void accounts_load(void)
     if (!accounts_open(&file, EFI_FILE_MODE_READ))
         return;
 
-    /* Ensure full read */
-    if (!EFI_ERROR(file->Read(file, &bytes, &store)) &&
+    /* Guard Read like Write in accounts_save(): a NULL Read entry must
+       skip the load cleanly instead of crashing the loader. */
+    if (file->Read && !EFI_ERROR(file->Read(file, &bytes, &store)) &&
         bytes == sizeof(store) &&
         store.magic == ACCOUNT_STORE_MAGIC &&
         store.count > 0 &&
