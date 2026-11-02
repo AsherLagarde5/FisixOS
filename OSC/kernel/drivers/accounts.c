@@ -120,7 +120,9 @@ static int accounts_save(void)
         return 0;
     }
 
-    if (EFI_ERROR(file->Write(file, &bytes, &store)) || bytes != sizeof(store)) {
+    /* Guard Write like SetPosition/Flush above: a NULL Write entry must
+       fail cleanly instead of crashing the loader on a bad protocol. */
+    if (!file->Write || EFI_ERROR(file->Write(file, &bytes, &store)) || bytes != sizeof(store)) {
         file->Close(file);
         return 0;
     }
