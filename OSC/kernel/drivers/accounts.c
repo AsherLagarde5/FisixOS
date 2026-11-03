@@ -65,6 +65,10 @@ static int accounts_open(EFI_FILE_PROTOCOL **file, UINT64 mode)
             return 0;
     }
 
+    /* Guard OpenVolume like Read/Write above: a NULL entry must fail
+       cleanly instead of crashing the loader on a bad protocol. */
+    if (!fs->OpenVolume)
+        return 0;
     acct_mark("ACCT_VOLUME_CALL");
     status = fs->OpenVolume(fs, &root);
     acct_mark("ACCT_VOLUME_RET");
