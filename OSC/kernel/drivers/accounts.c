@@ -75,6 +75,11 @@ static int accounts_open(EFI_FILE_PROTOCOL **file, UINT64 mode)
     if (EFI_ERROR(status) || !root)
         return 0;
 
+    /* Guard Open/Close like OpenVolume above: a NULL entry must fail
+       cleanly instead of crashing the loader on a bad protocol. */
+    if (!root->Open || !root->Close)
+        return 0;
+
     /* Use a static filename to avoid temp array lifetime issues */
     static const CHAR16 filename[] = L"\\fisix_users.db";
 
