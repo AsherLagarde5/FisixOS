@@ -45,6 +45,15 @@ static void acct_mark(const char *s) {
     acct_outb(0x3F8, (uint8_t)'\n');
 }
 
+/* Guard Close like the other protocol entries below: a NULL Close
+   entry must fail cleanly instead of crashing the loader on a bad
+   protocol. */
+static void accounts_close(EFI_FILE_PROTOCOL *file)
+{
+    if (file && file->Close)
+        file->Close(file);
+}
+
 /* --- PATCH: safer accounts_open() --- */
 static int accounts_open(EFI_FILE_PROTOCOL **file, UINT64 mode)
 {
@@ -125,21 +134,21 @@ static int accounts_save(void)
 
     /* Rewind before writing; the store size is fixed, so this overwrites it. */
     if (file->SetPosition && EFI_ERROR(file->SetPosition(file, 0))) {
-        file->Close(file);
+        accounts_close(file);
         return 0;
     }
 
     /* Guard Write like SetPosition/Flush above: a NULL Write entry must
        fail cleanly instead of crashing the loader on a bad protocol. */
     if (!file->Write || EFI_ERROR(file->Write(file, &bytes, &store)) || bytes != sizeof(store)) {
-        file->Close(file);
+        accounts_close(file);
         return 0;
     }
 
     if (file->Flush)
         file->Flush(file);
 
-    file->Close(file);
+    accounts_close(file);
     return 1;
 }
 
@@ -176,7 +185,7 @@ static void accounts_load(void)
         }
     }
 
-    file->Close(file);
+    accounts_close(file);
 }
 
 static int equal_str(const CHAR16 *a, const CHAR16 *b)
