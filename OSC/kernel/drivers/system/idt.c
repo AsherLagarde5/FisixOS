@@ -38,6 +38,11 @@ void idt_set_gate(int vec, uint64_t handler, uint16_t selector, uint8_t flags)
            delivery, so refuse a gate that can never run. */
         return;
     }
+    if (flags == 0) {
+        /* A zero type/attribute byte leaves the gate not present,
+           so it would fault on delivery just like a null handler. */
+        return;
+    }
     idt[vec].offset_low = handler & 0xFFFF;
     idt[vec].offset_mid = (handler >> 16) & 0xFFFF;
     idt[vec].offset_high = (handler >> 32) & 0xFFFFFFFF;
