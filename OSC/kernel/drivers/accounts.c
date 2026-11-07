@@ -284,7 +284,14 @@ int accounts_add(const CHAR16 *name, const CHAR16 *password)
     copy_str(accounts[account_count].password, password);
     accounts[account_count].admin = 0;
     account_count++;
-    return accounts_save();
+    if (!accounts_save()) {
+        /* Save failed: roll the add back, so the in-memory list still
+           matches what is on disk instead of keeping a phantom user
+           that vanishes on the next load. */
+        account_count--;
+        return 0;
+    }
+    return 1;
 }
 
 int accounts_change_password(const CHAR16 *old_password, const CHAR16 *new_password)
