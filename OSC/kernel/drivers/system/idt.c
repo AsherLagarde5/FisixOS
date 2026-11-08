@@ -76,23 +76,16 @@ void idt_init(void)
     idtp.limit = (sizeof(struct idt_entry64) * IDT_ENTRIES) - 1;
     idtp.base = (uint64_t)&idt[0];
     
-    /* Set up IRQ handlers (0-15) */
-    idt_set_gate(0, (uint64_t)irq0, cs, 0x8E);
-    idt_set_gate(1, (uint64_t)irq1, cs, 0x8E);
-    idt_set_gate(2, (uint64_t)irq2, cs, 0x8E);
-    idt_set_gate(3, (uint64_t)irq3, cs, 0x8E);
-    idt_set_gate(4, (uint64_t)irq4, cs, 0x8E);
-    idt_set_gate(5, (uint64_t)irq5, cs, 0x8E);
-    idt_set_gate(6, (uint64_t)irq6, cs, 0x8E);
-    idt_set_gate(7, (uint64_t)irq7, cs, 0x8E);
-    idt_set_gate(8, (uint64_t)irq8, cs, 0x8E);
-    idt_set_gate(9, (uint64_t)irq9, cs, 0x8E);
-    idt_set_gate(10, (uint64_t)irq10, cs, 0x8E);
-    idt_set_gate(11, (uint64_t)irq11, cs, 0x8E);
-    idt_set_gate(12, (uint64_t)irq12, cs, 0x8E);
-    idt_set_gate(13, (uint64_t)irq13, cs, 0x8E);
-    idt_set_gate(14, (uint64_t)irq14, cs, 0x8E);
-    idt_set_gate(15, (uint64_t)irq15, cs, 0x8E);
+    /* IRQ handlers 0-15, in vector order: one loop instead of 16
+       copy-pasted idt_set_gate() calls, so a future vector change
+       cannot drift out of sync between the two lists. */
+    static void (*const irq_handlers[16])(void) = {
+        irq0, irq1, irq2, irq3, irq4, irq5, irq6, irq7,
+        irq8, irq9, irq10, irq11, irq12, irq13, irq14, irq15
+    };
+    for (int i = 0; i < 16; i++) {
+        idt_set_gate(i, (uint64_t)irq_handlers[i], cs, 0x8E);
+    }
     
     /* Load the IDT */
     idt_load((uint64_t)&idtp);
