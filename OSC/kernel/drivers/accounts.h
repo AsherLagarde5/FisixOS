@@ -12,8 +12,10 @@ int accounts_login(const CHAR16 *name, const CHAR16 *password);
 int accounts_add(const CHAR16 *name, const CHAR16 *password);
 int accounts_change_password(const CHAR16 *old_password, const CHAR16 *new_password);
 int accounts_is_admin(void);
+/* Stale index falls back to "nobody", never NULL. */
 const CHAR16 *accounts_current_user(void);
 int accounts_count(void);
+/* Out-of-range index returns NULL, never a stale name. */
 const CHAR16 *accounts_user_at(int index);
 
 #endif
