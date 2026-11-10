@@ -287,8 +287,12 @@ int accounts_add(const CHAR16 *name, const CHAR16 *password)
     if (!accounts_save()) {
         /* Save failed: roll the add back, so the in-memory list still
            matches what is on disk instead of keeping a phantom user
-           that vanishes on the next load. */
+           that vanishes on the next load. Clear the rolled-back slot
+           too, so its name and password do not linger in memory. */
         account_count--;
+        accounts[account_count].name[0] = 0;
+        accounts[account_count].password[0] = 0;
+        accounts[account_count].admin = 0;
         return 0;
     }
     return 1;
