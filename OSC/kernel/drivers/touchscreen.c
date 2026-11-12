@@ -24,7 +24,12 @@ int touchscreen_is_hid_over_i2c_expected(void)
 
 void touchscreen_update_absolute(int x, int y, int down)
 {
-    g_touch_x = x; g_touch_y = y; g_touch_down = down;
+    /* Touch coordinates are screen positions: never negative, and
+       down is a boolean. Clamp a bad report instead of letting a
+       negative coordinate reach GUI hit-testing. */
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    g_touch_x = x; g_touch_y = y; g_touch_down = down ? 1 : 0;
 }
 
 int touchscreen_last_x(void) { return g_touch_x; }
