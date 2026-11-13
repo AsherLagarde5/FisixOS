@@ -174,10 +174,10 @@ static const uint8_t *parse_headers(const uint8_t *data, uint32_t len,
             uint32_t off = 0;
             while (off < segdata) {
                 uint8_t tc = seg[off] >> 4, th = seg[off] & 15; off++;
+                if (th >= 4) return 0; /* table id is 0..3; check before indexing */
                 if (off + 16 > segdata) return 0;
                 huff_t *h = (tc == 0) ? &hdc[th] : &hac[th];
                 int *ok = (tc == 0) ? &hdc_ok[th] : &hac_ok[th];
-                if (th >= 4) return 0;
                 int total = 0;
                 for (i = 0; i < 16; i++) { h->count[i] = seg[off + i]; total += h->count[i]; }
                 off += 16;
