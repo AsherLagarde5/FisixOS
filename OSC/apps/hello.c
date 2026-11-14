@@ -5,6 +5,10 @@
 
 int fse_main(fisix_api_t *api)
 {
+    /* The loader always passes a valid table, but a NULL here would
+       crash on the first api->print; fail cleanly instead. */
+    if (!api)
+        return 1;
     api->print("Hello from FisixOS, from a .fse program!");
     api->print_newline();
     api->print("42 + 1 = ");
