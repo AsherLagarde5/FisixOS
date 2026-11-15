@@ -79,6 +79,12 @@ void mouse_update_from_packet(const MousePacket *packet)
     if (!packet)
         return;
 
+    /* Same guard as mouse_handle_interrupt(): ignore packets until
+       mouse_init() has run, so no packet can move the cursor state
+       before the driver is ready. */
+    if (!mouse_enabled)
+        return;
+
     if (!mouse_is_basic_mouse_supported(packet->protocol))
         return;
 
