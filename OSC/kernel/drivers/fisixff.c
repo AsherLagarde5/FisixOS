@@ -12,7 +12,7 @@ static int ff_parse(const uint8_t *img, size_t len, const char *want, const uint
         for (j=0;j<nl;j++) name[j]=(char)img[pos+j]; name[nl]=0; pos+=nl;
         off = img[pos] | (img[pos+1]<<8) | (img[pos+2]<<16) | ((uint32_t)img[pos+3]<<24); sz = img[pos+4] | (img[pos+5]<<8) | (img[pos+6]<<16) | ((uint32_t)img[pos+7]<<24); pos+=8;
         if (list_out) { int k=0; while (name[k] && list_len+1<list_cap) list_out[list_len++]=name[k++]; if (list_len+1<list_cap) list_out[list_len++]='\n'; list_out[list_len]=0; }
-        if (want && ff_strcmp(name, want)==0) { if (off+sz>len) return -1; if (data) *data=img+off; if (size) *size=sz; return 0; }
+        if (want && ff_strcmp(name, want)==0) { if (off > len || sz > len - off) return -1; /* off+sz can wrap in 32 bits; compare without adding */ if (data) *data=img+off; if (size) *size=sz; return 0; }
     }
     return want ? -2 : 0;
 }
