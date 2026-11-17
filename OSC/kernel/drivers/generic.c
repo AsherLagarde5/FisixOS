@@ -23,12 +23,14 @@ static uint8_t cmos_read(uint8_t reg){
 static int bcd_to_bin(uint8_t v){ return ((v>>4)*10)+(v&0x0F); }
 int generic_rtc_read(rtc_time_t *out){
     uint8_t status_b, sec, min, hr, day, mon, yr;
+    int hr_pm = 0; /* 12-hour mode: save PM flag before BCD strips bit 7 */
     if(!out) return 0;
     status_b=cmos_read(0x0B);
     sec=cmos_read(0x00); min=cmos_read(0x02); hr=cmos_read(0x04);
     day=cmos_read(0x07); mon=cmos_read(0x08); yr=cmos_read(0x09);
+    if(!(status_b&0x02)){ hr_pm = (hr&0x80) != 0; hr &= 0x7F; }
     if(!(status_b&0x04)){ sec=bcd_to_bin(sec); min=bcd_to_bin(min); hr=bcd_to_bin(hr); day=bcd_to_bin(day); mon=bcd_to_bin(mon); yr=bcd_to_bin(yr); }
-    if(!(status_b&0x02)){ if(hr&0x80) hr=((hr&0x7F)+12)%24; }
+    if(!(status_b&0x02)){ hr = hr_pm ? (hr%12)+12 : hr%12; } /* 12 AM -> 0, 12 PM -> 12 */
     out->second=sec; out->minute=min; out->hour=hr; out->day=day; out->month=mon; out->year=2000+yr;
     return (mon>=1 && mon<=12 && day>=1 && day<=31) ? 1 : 0;
 }
