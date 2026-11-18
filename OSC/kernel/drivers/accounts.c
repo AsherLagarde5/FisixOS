@@ -304,8 +304,17 @@ int accounts_change_password(const CHAR16 *old_password, const CHAR16 *new_passw
        the live accounts: a stale index must not read out of bounds. */
     if (current_account < 0 || current_account >= account_count || !equal_str(accounts[current_account].password, old_password) || !valid_str(new_password))
         return 0;
+    /* Keep the old password so a failed save can roll the change back,
+       like accounts_add() does: otherwise memory would hold a password
+       the disk never got, and it would vanish on the next load. */
+    CHAR16 old_copy[ACCOUNT_TEXT_MAX + 1];
+    copy_str(old_copy, accounts[current_account].password);
     copy_str(accounts[current_account].password, new_password);
-    return accounts_save();
+    if (!accounts_save()) {
+        copy_str(accounts[current_account].password, old_copy);
+        return 0;
+    }
+    return 1;
 }
 
 int accounts_is_admin(void)
