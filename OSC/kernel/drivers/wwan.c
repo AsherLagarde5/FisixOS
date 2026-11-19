@@ -85,6 +85,9 @@ uint32_t wwan_mbim_build_command(uint8_t *buf, uint32_t buf_len,
                                  const uint8_t *payload, uint32_t payload_len) {
     uint32_t total, i;
     if (!buf || !service_uuid) return 0;
+    /* A payload length with no payload buffer would copy from NULL
+       below; a zero-length payload with a NULL buffer is fine. */
+    if (payload_len > 0 && !payload) return 0;
     total = 48 + payload_len;
     if (buf_len < total) return 0;
     put32le(buf + 0, MBIM_TYPE_COMMAND);
@@ -133,6 +136,7 @@ static int parse_int_after(const char *s, const char *key, int *out) {
 
 int wwan_at_parse_csq(const char *resp, wwan_status_t *st) {
     int csq;
+    if (!st) return 0;
     if (!parse_int_after(resp, "+CSQ: ", &csq)) return 0;
     st->signal_csq = csq;
     st->signal_dbm = (csq >= 0 && csq <= 31) ? (-113 + 2 * csq) : -999;
@@ -144,7 +148,7 @@ int wwan_at_parse_creg(const char *resp, wwan_status_t *st) {
     /* +CREG: <n>,<stat> -- take the last comma-separated int. */
     const char *p = resp;
     int last = -1, cur, in_num = 0;
-    if (!resp) return 0;
+    if (!resp || !st) return 0;
     cur = 0;
     while (*p) {
         if (*p >= '0' && *p <= '9') { cur = cur * 10 + (*p - '0'); in_num = 1; }
@@ -162,7 +166,7 @@ int wwan_at_parse_creg(const char *resp, wwan_status_t *st) {
 int wwan_at_parse_cgpaddr(const char *resp, wwan_status_t *st) {
     const char *q1, *q2;
     int i = 0;
-    if (!resp) return 0;
+    if (!resp || !st) return 0;
     /* +CGPADDR: 1,"10.0.0.2" -- copy the quoted address. */
     q1 = resp;
     while (*q1 && *q1 != '"') q1++;
