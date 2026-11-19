@@ -103,6 +103,11 @@ void cpu_init(void)
     }
 }
 
+int cpu_has_sse(void) { return (g_cpu_info.features_edx & (1u << 25)) != 0; }
+int cpu_has_sse2(void) { return (g_cpu_info.features_edx & (1u << 26)) != 0; }
+int cpu_has_avx(void) { return (g_cpu_info.features_ecx & (1u << 28)) != 0; }
+int cpu_has_avx2(void) { return 0; /* leaf 7 not stored in cpu_info_t yet; amd_cpu.c checks leaf 7 directly. Do not assume AVX2. */ }
+
 int cpu_is_tiger_lake(void)
 {
     /* Tiger Lake (11th Gen, including i5-1145G7): Intel, family 6, model 140 (0x8C).

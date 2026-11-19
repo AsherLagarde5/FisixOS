@@ -7,8 +7,11 @@
    Latitude 5420 boots from an NVMe SSD (PCI class 0x01, subclass 0x08,
    prog-if 0x02). This is a real driver, not detection only: it
    enables the controller, creates queues, runs Identify, and can
-   read LBAs into a caller buffer. Writes, multiple namespaces,
-   interrupts (polling only) and power management are not in v1. */
+   read LBAs into a caller buffer. Writes exist as
+   nvme_write_lba (opcode 0x01, mirror of the read path) but
+   are UNPROVEN on hardware/QEMU in this stage - see nvme.c.
+   Multiple namespaces, interrupts (polling only) and power
+   management are not in v1. */
 typedef struct {
     pci_device_t pci;
     uint64_t bar;
@@ -32,4 +35,12 @@ int nvme_init(nvme_info_t *out);
 /* Read one LBA (lba_data_size bytes, usually 512) into buf.
    Returns 1 on success, 0 on failure or if nvme_init was not run. */
 int nvme_read_lba(uint64_t lba, uint8_t *buf);
+/* Write one LBA from buf. Returns 1 on success, 0 on failure.
+   UNPROVEN on hardware/QEMU in this stage - see nvme.c. */
+int nvme_write_lba(uint64_t lba, const uint8_t *buf);
+/* Namespace 1 as a fisix_block_dev_t (needs block.h included
+ * by the caller, or include it here via a forward struct).
+ * Only valid after nvme_init() succeeded. */
+struct fisix_block_dev;
+int nvme_block_dev(struct fisix_block_dev *dev);
 #endif

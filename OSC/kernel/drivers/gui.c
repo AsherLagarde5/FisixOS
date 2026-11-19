@@ -14,7 +14,10 @@
 #include "generic.h"
 #include "proc.h"
 #include "fse_embedded.h"
+#include "deb.h"
 #include "logo_embedded.h"
+#include "lvgl_port.h"
+#include "lvgl_win8.h"
 static void gui_run_fse(const char *name);
 
 static uint32_t *gui_fb = 0;
@@ -35,6 +38,19 @@ static uint32_t gui_accent_col = 0x006B21A8u;
 #define COL_W11_SHADOW 0x00111111u
 static int gui_mx = 640, gui_my = 400;
 static int gui_prev_left = 0;
+/* LVGL pointer state: held = physical left button / touch down.
+ * gui_prev_left is a click latch, not a held state, so LVGL
+ * needs its own bit, set on press and cleared on release. */
+static int gui_pointer_held = 0;
+int gui_pointer_down(void) { return gui_pointer_held; }
+static void gui_lvgl_resume_if_suspended(void)
+{
+    if (lvgl_port_is_suspended()) lvgl_win8_resume();
+}
+static void gui_lvgl_feed_release(void)
+{
+    if (lvgl_is_active()) lvgl_port_feed_pointer(gui_mx, gui_my, 0);
+}
 static int gui_start_open = 0;
 static int gui_tick_count = 0;
 static int gui_e0_prefix = 0;
@@ -426,6 +442,15 @@ static void gui_open_app(const char *name)
     if (name[0]=='A' && name[1]=='L') { gui_mode=MODE_ALLAPPS; gui_win_title="ALL APPS"; gui_allapps_page=0; return; }
     gui_mode=MODE_WINDOW; gui_win_title=name; gui_win_lines[0]=gui_app_desc(name); gui_win_lines[1]="WINDOW OPENED - CLICK X"; gui_win_lines[2]="OR PRESS ESC TO CLOSE"; gui_win_lines[3]="ARROWS MOVE - ENTER CLICKS"; gui_win_count=4;
 }
+/* Public wrapper for the LVGL Start screen: open an existing
+ * FisixOS app by name, then draw it. The tile caller suspends
+ * LVGL first; closing the window resumes the Start screen. */
+void gui_open_app_public(const char *name)
+{
+    if (!name) return;
+    gui_open_app(name);
+    gui_draw();
+}
 #define GUI_CUR_BOX 64
 static uint32_t gui_cursor_saved[GUI_CUR_BOX * GUI_CUR_BOX];
 static int gui_cursor_saved_x = 0, gui_cursor_saved_y = 0, gui_cursor_saved_valid = 0;
@@ -524,7 +549,7 @@ static void gui_move_to(int nx, int ny)
     }
     if (gui_mode == MODE_PONG) { gui_pong_py = gui_my - 80; if (gui_pong_py < 0) gui_pong_py = 0; if (gui_pong_py > (int)gui_h - 120) gui_pong_py = (int)gui_h - 120; }
     new_hover = gui_hover_code();
-    if (new_hover != old_hover) { gui_restore_cursor_box(); gui_draw_desktop_icons(); gui_draw_taskbar(); gui_save_cursor_box(); gui_draw_cursor_shape(); return; }
+    if (new_hover != old_hover) { gui_draw(); return; }
     if (paint_px >= 0) gui_put(gui_win_x + 24 + paint_px, gui_win_y + 64 + paint_py, COL_RED);
     gui_save_cursor_box();
     gui_draw_cursor_shape();
@@ -705,7 +730,7 @@ static void gui_draw_window(void)
     gui_fill_rounded(wx+ww-gui_s(24), wy+wh-gui_s(24), gui_s(24), gui_s(24), gui_s(6), COL_W11_GREY);
     gui_draw_window_content();
 }
-/* Dirty-rect helpers, 2026-10-30: opening a window, selecting
+/* Full-redraw helpers, 2026-10-30 refresh fix: opening a window, selecting
  * an app, or typing in one used to call gui_draw(), repainting
  * the whole screen. Now most updates redraw only the area
  * that actually changed - the window, its content, the
@@ -715,44 +740,37 @@ static void gui_draw_window(void)
  * colour change, where the whole desktop really does change. */
 static void gui_draw_window_only(void)
 {
-    if (!gui_ready || !gui_win_visible) return;
-    gui_restore_cursor_box();
-    gui_fill(gui_win_x, gui_win_y, gui_win_w, gui_win_h, COL_WINDOW);
-    gui_draw_window();
-    gui_save_cursor_box(); gui_draw_cursor_shape();
+    /* Refresh fix, 2026-10-30, bare-metal photo: partial redraws
+     * left ghosts - old menus, old windows, solid blue patches
+     * where the gradient should be, because they never repainted
+     * what was underneath. Now every window change does a full
+     * redraw in correct z-order: gradient, rainbow, menu, icons,
+     * window, taskbar, cursor. Slower per click, correct always.
+     * Mouse moves stay cursor-only in gui_move_to, so moving
+     * does not pay the full redraw cost. */
+    if (!gui_ready) return;
+    gui_draw();
 }
 static void gui_draw_content_only(void)
 {
-    int wx=gui_win_x, wy=gui_win_y, ww=gui_win_w, wh=gui_win_h;
-    if (!gui_ready || !gui_win_visible) return;
-    gui_restore_cursor_box();
-    gui_fill(wx, wy+gui_s(40), ww, wh-gui_s(40), COL_WINDOW);
-    gui_draw_window_content();
-    gui_save_cursor_box(); gui_draw_cursor_shape();
+    if (!gui_ready) return;
+    gui_draw();
 }
 static void gui_draw_taskbar_only(void)
 {
     if (!gui_ready) return;
-    gui_restore_cursor_box(); gui_draw_taskbar(); gui_save_cursor_box(); gui_draw_cursor_shape();
+    gui_draw();
 }
 static void gui_draw_close_window(void)
 {
-    int wx=gui_win_x, wy=gui_win_y, ww=gui_win_w, wh=gui_win_h;
     if (!gui_ready) return;
-    gui_restore_cursor_box();
-    gui_fill(wx, wy, ww, wh, gui_bg_col);
-    if (gui_desktop_icons_on) gui_draw_desktop_icons();
-    if (gui_rainbow_on) gui_draw_rainbow_stripe(gui_s(52));
-    gui_save_cursor_box(); gui_draw_cursor_shape();
+    gui_draw();
 }
 static void gui_redraw_window_move(int ox,int oy,int ow,int oh)
 {
+    (void)ox; (void)oy; (void)ow; (void)oh;
     if (!gui_ready) return;
-    gui_restore_cursor_box();
-    gui_fill(ox, oy, ow, oh, gui_bg_col);
-    if (gui_desktop_icons_on) gui_draw_desktop_icons();
-    gui_draw_window();
-    gui_save_cursor_box(); gui_draw_cursor_shape();
+    gui_draw();
 }
 void gui_debug_clear(void)
 {
@@ -821,7 +839,7 @@ static void gui_draw_menu_bar(void)
 static void gui_draw_menu_only(void)
 {
     if (!gui_ready) return;
-    gui_restore_cursor_box(); gui_fill(0, gui_s(76), (int)gui_w, gui_s(32)+gui_s(300), gui_bg_col); gui_draw_menu_bar(); gui_save_cursor_box(); gui_draw_cursor_shape();
+    gui_draw();
 }
 void gui_draw(void)
 {
@@ -894,7 +912,9 @@ void gui_usb_move(int dx, int dy, int buttons)
 {
     gui_mouse_move(dx, dy);
     if (buttons & 1) { if (!gui_prev_left) gui_mouse_click(1); }
-    else gui_prev_left = 0;
+    else { gui_prev_left = 0; gui_pointer_held = 0;
+        gui_lvgl_feed_release();
+    }
     /* No gui_draw() here: gui_mouse_move already updated the
        cursor, and gui_mouse_click already full-draws on a
        click. A full draw here was the 1 px = whole screen bug. */
@@ -928,7 +948,9 @@ void gui_trackball_move(int dx, int dy, int buttons)
     gui_scroll_accum = 0;
     gui_mouse_move(dx * 2, dy * 2);
     if (left) { if (!gui_prev_left) gui_mouse_click(1); }
-    else gui_prev_left = 0;
+    else { gui_prev_left = 0; gui_pointer_held = 0;
+        gui_lvgl_feed_release();
+    }
     if (right && !gui_prev_right) {
         if (gui_win_visible) gui_win_visible = 0;
         else gui_start_open = !gui_start_open;
@@ -948,7 +970,9 @@ void gui_touch_set(int x, int y, int down)
     if (!gui_ready) return;
     gui_move_to(x, y);
     if (down) { if (!gui_prev_left) gui_mouse_click(1); }
-    else gui_prev_left = 0;
+    else { gui_prev_left = 0; gui_pointer_held = 0;
+        gui_lvgl_feed_release();
+    }
     /* No gui_draw(): gui_move_to already updated the cursor,
        and a click already full-draws. */
 }
@@ -963,9 +987,116 @@ static void gui_calc_eval(void)
     v = nn?nums[0]:0; for (i=0;i<on;i++) { if (ops[i]=='+') v+=nums[i+1]; else if (ops[i]=='-') v-=nums[i+1]; }
     gui_calc_result=v;
 }
+/* `deb` terminal command (see docs/DEB.md). The terminal has no
+ * disk file loading after ExitBootServices, so `deb install` works
+ * on .debs baked into the kernel image by tools/embed_deb.py;
+ * anything else prints where to put the .deb. Output lines are
+ * pushed one at a time because the terminal shows 6 lines of
+ * 63 chars. */
+static void gui_deb_push_lines(const char *s)
+{
+    char line[64];
+    int n = 0;
+    while (s && *s) {
+        if (*s == '\n' || n >= 63) {
+            line[n] = 0;
+            if (n > 0) gui_term_push(line);
+            n = 0;
+            if (*s == '\n') s++;
+        } else {
+            line[n++] = *s++;
+        }
+    }
+    if (n > 0) { line[n] = 0; gui_term_push(line); }
+}
+static int gui_deb_is(const char *s)
+{
+    return (s[0] == 'd' || s[0] == 'D') && (s[1] == 'e' || s[1] == 'E') &&
+           (s[2] == 'b' || s[2] == 'B') && (s[3] == 0 || s[3] == ' ');
+}
+static void gui_deb_cmd(void)
+{
+    const char *arg = gui_input + 3;
+    char err[128], info[512];
+    int r;
+    while (*arg == ' ') arg++;
+    deb_install_embedded();
+    if (!*arg) {
+        gui_term_push("DEB INSTALL LIST INFO");
+        gui_term_push("REMOVE RUN - SEE DOCS");
+        gui_term_push("DEB.MD");
+        return;
+    }
+    if ((arg[0] == 'l' || arg[0] == 'L')) {
+        int i, n = deb_count();
+        char buf[64];
+        if (n == 0) { gui_term_push("NO PACKAGES INSTALLED"); return; }
+        for (i = 0; i < n; i++) {
+            deb_pkg_t pkg;
+            int j = 0, k;
+            if (deb_get(i, &pkg) != 0) continue;
+            while (pkg.name[j] && j < 40) { buf[j] = pkg.name[j]; j++; }
+            buf[j++] = ' ';
+            for (k = 0; pkg.version[k] && j < 60; k++) buf[j++] = pkg.version[k];
+            buf[j] = 0;
+            gui_term_push(buf);
+        }
+        return;
+    }
+    if ((arg[0] == 'i' || arg[0] == 'I') && (arg[1] == 'n' || arg[1] == 'N') &&
+        (arg[2] == 'f' || arg[2] == 'F')) {
+        const char *name = arg + 4;
+        while (*name == ' ') name++;
+        r = deb_info(name, info, sizeof(info));
+        if (r != 0) { gui_term_push("PACKAGE NOT FOUND"); return; }
+        gui_deb_push_lines(info);
+        return;
+    }
+    if ((arg[0] == 'i' || arg[0] == 'I') && (arg[1] == 'n' || arg[1] == 'N') &&
+        (arg[2] == 's' || arg[2] == 'S')) {
+        /* "install <name>" — embedded .debs only (see above). */
+        const char *name = arg + 7;
+        while (*name == ' ') name++;
+        if (!*name) { gui_term_push("DEB INSTALL <NAME>"); return; }
+        if (deb_find(name, 0) == 0) { gui_term_push("ALREADY INSTALLED"); return; }
+        gui_term_push("NOT EMBEDDED - PUT THE");
+        gui_term_push(".DEB IN OSC/DEBS AND RUN");
+        gui_term_push("TOOLS/EMBED_DEB.PY, THEN");
+        gui_term_push("REBUILD THE KERNEL");
+        return;
+    }
+    if ((arg[0] == 'r' || arg[0] == 'R') && (arg[1] == 'e' || arg[1] == 'E')) {
+        const char *name = arg + 6;
+        while (*name == ' ') name++;
+        if (!*name) { gui_term_push("DEB REMOVE <NAME>"); return; }
+        r = deb_remove(name);
+        gui_term_push(r == 0 ? "REMOVED" : "PACKAGE NOT FOUND");
+        return;
+    }
+    if ((arg[0] == 'r' || arg[0] == 'R') && (arg[1] == 'u' || arg[1] == 'U')) {
+        /* "run <pkg> <path>" */
+        const char *rest = arg + 3;
+        char pkg[64], path[128];
+        int i = 0, j = 0;
+        while (*rest == ' ') rest++;
+        while (rest[i] && rest[i] != ' ' && i < 63) { pkg[i] = rest[i]; i++; }
+        pkg[i] = 0;
+        while (rest[i] == ' ') i++;
+        while (rest[i] && j < 127) { path[j++] = rest[i++]; }
+        path[j] = 0;
+        if (!pkg[0] || !path[0]) { gui_term_push("DEB RUN <PKG> <PATH>"); return; }
+        r = deb_run(pkg, path, err, sizeof(err));
+        if (r == 0) { gui_term_push("RAN OK"); return; }
+        gui_term_push("NOT RUNNABLE:");
+        gui_deb_push_lines(err);
+        return;
+    }
+    gui_term_push("UNKNOWN DEB COMMAND");
+}
 static void gui_term_exec(void)
 {
     if (!gui_strlen(gui_input)) return;
+    if (gui_deb_is(gui_input)) { gui_deb_cmd(); return; }
     if (gui_input[0]=='B' || gui_input[0]=='b' || gui_input[0]=='R' || gui_input[0]=='r' || gui_input[0]=='N' || gui_input[0]=='n' || gui_input[0]=='P' || gui_input[0]=='p' || gui_input[0]=='C' || gui_input[0]=='c' || gui_input[0]=='Z' || gui_input[0]=='z') {
         const char *nm=gui_input; if ((nm[0]=='R' || nm[0]=='r') && (nm[1]=='U' || nm[1]=='u') && (nm[2]=='N' || nm[2]=='n') && nm[3]==' ') nm+=4;
         if ((nm[0]=='B' || nm[0]=='b') && (nm[1]=='R' || nm[1]=='r')) gui_run_fse("BROWSY");
@@ -977,7 +1108,7 @@ static void gui_term_exec(void)
         else gui_term_push("UNKNOWN - TRY HELP");
         return;
     }
-    if (gui_input[0]=='H' || gui_input[0]=='h') { gui_term_push("HELP ECHO VER APPS"); }
+    if (gui_input[0]=='H' || gui_input[0]=='h') { gui_term_push("HELP ECHO VER APPS DEB"); }
     else if (gui_input[0]=='V' || gui_input[0]=='v') { gui_term_push("FISIXOS GUI V2"); }
     else if (gui_input[0]=='A' || gui_input[0]=='a') { gui_term_push("55 APPS IN ALL APPS"); }
     else if (gui_input[0]=='E' && gui_input[1]=='C') { gui_term_push(gui_input+5); }
@@ -988,7 +1119,10 @@ void gui_mouse_click(int left_down)
 {
     int ty, wx, wy, ww, wh, i;
     if (!left_down || gui_prev_left) return;
-    gui_prev_left=1; ty=(int)gui_h-gui_taskbar_h; wx=gui_win_x; wy=gui_win_y; ww=gui_win_w; wh=gui_win_h;
+    gui_prev_left=1; gui_pointer_held=1; ty=(int)gui_h-gui_taskbar_h; wx=gui_win_x; wy=gui_win_y; ww=gui_win_w; wh=gui_win_h;
+    /* LVGL Start screen owns the framebuffer: the click goes to
+     * LVGL, not to the old-GUI menu/window code below. */
+    if (lvgl_is_active()) { lvgl_port_feed_pointer(gui_mx, gui_my, 1); return; }
     /* Menu bar first (Windows 1.0 style): FILE / APPS / GAMES / SETTINGS / HELP */
     if (gui_my>=gui_s(76) && gui_my<gui_s(108)) {
         int m=0; if (gui_mx>=gui_s(16) && gui_mx<gui_s(116)) m=1; else if (gui_mx>=gui_s(120) && gui_mx<gui_s(220)) m=2; else if (gui_mx>=gui_s(224) && gui_mx<gui_s(324)) m=3; else if (gui_mx>=gui_s(328) && gui_mx<gui_s(428)) m=4; else if (gui_mx>=gui_s(432) && gui_mx<gui_s(532)) m=5;
@@ -1041,7 +1175,9 @@ void gui_mouse_click(int left_down)
     if (gui_resizing) { gui_resizing=0; gui_win_w=((gui_win_w+20)/40)*40; gui_win_h=((gui_win_h+20)/40)*40; if (gui_win_w<320) gui_win_w=320; if (gui_win_h<200) gui_win_h=200; gui_draw_window_only(); return; }
     /* Title bar: drag, snap, close */
     if (gui_inside(gui_mx,gui_my,wx,wy,ww,gui_s(40))) {
-        if (gui_inside(gui_mx,gui_my,wx+ww-gui_s(36),wy+gui_s(8),gui_s(24),gui_s(24))) { int was_pong=(gui_mode==MODE_PONG); gui_win_visible=0; if (was_pong) gui_snap_apply(0); gui_draw_close_window(); return; }
+        if (gui_inside(gui_mx,gui_my,wx+ww-gui_s(36),wy+gui_s(8),gui_s(24),gui_s(24))) { int was_pong=(gui_mode==MODE_PONG); gui_win_visible=0; if (was_pong) gui_snap_apply(0); gui_draw_close_window();
+            gui_lvgl_resume_if_suspended();
+            return; }
         if (gui_inside(gui_mx,gui_my,wx+ww-gui_s(64),wy+gui_s(8),gui_s(24),gui_s(24))) { int ns=(gui_snap_state+1)%4; if (ns==0) { gui_win_x=gui_win_norm_x; gui_win_y=gui_win_norm_y; gui_win_w=gui_win_norm_w; gui_win_h=gui_win_norm_h; gui_snap_state=0; } else gui_snap_apply(ns); gui_draw_window_only(); return; }
         gui_dragging=1; gui_drag_off_x=gui_mx-gui_win_x; gui_drag_off_y=gui_my-gui_win_y; gui_draw_window_only(); return;
     }
@@ -1070,7 +1206,9 @@ void gui_mouse_click(int left_down)
     if (gui_mode==MODE_ALLAPPS && gui_inside(gui_mx,gui_my,wx+24,wy+64+5*36,200,32)) { gui_allapps_page++; if (gui_allapps_page*5>=55) gui_allapps_page=0; gui_draw_content_only(); return; }
     if (gui_mode==MODE_ALLAPPS) { for (i=0;i<5;i++) { int idx=gui_allapps_page*5+i; if (idx<55 && gui_inside(gui_mx,gui_my,wx+24,wy+64+i*36,300,32)) { gui_open_app(gui_apps[idx]); gui_draw_window_only(); return; } } }
     if (gui_mode==MODE_WINDOW) {
-        if (gui_inside(gui_mx,gui_my,wx+24,wy+wh-48,120,32)) { gui_win_visible=0; gui_draw_close_window(); return; }
+        if (gui_inside(gui_mx,gui_my,wx+24,wy+wh-48,120,32)) { gui_win_visible=0; gui_draw_close_window();
+            gui_lvgl_resume_if_suspended();
+            return; }
         if (gui_inside(gui_mx,gui_my,wx+160,wy+wh-48,160,32)) { gui_open_app("GAMES"); gui_draw_window_only(); return; }
     }
     if (gui_mode==MODE_FILES) {
@@ -1151,15 +1289,44 @@ static int gui_fse_read_key(void)
         }
     }
 }
+/* API v3 poll: same PS/2 decoding as read_key, but return -1 at
+ * once if no byte is waiting, instead of spinning. An 0xE0 prefix
+ * with its second byte not yet arrived is remembered in
+ * gui_fse_pending_e0, so the arrow key is not lost. */
+static int gui_fse_pending_e0 = 0;
+static int gui_fse_poll_key(void)
+{
+    uint8_t st, b;
+    if (gui_fse_pending_e0) {
+        uint8_t b2;
+        if (!(gui_inb(0x64) & 0x01)) return -1;
+        b2 = gui_inb(0x60); gui_fse_pending_e0 = 0;
+        if (b2==0x48) return 0x10001; if (b2==0x50) return 0x10002; if (b2==0x4B) return 0x10003; if (b2==0x4D) return 0x10004; return -1;
+    }
+    st = gui_inb(0x64);
+    if (!(st & 0x01)) return -1;
+    b = gui_inb(0x60);
+    if (st & 0x20) return -1; /* mouse packet, not a key */
+    if (b==0xE0) {
+        if (!(gui_inb(0x64) & 0x01)) { gui_fse_pending_e0 = 1; return -1; }
+        { uint8_t b2 = gui_inb(0x60);
+          if (b2==0x48) return 0x10001; if (b2==0x50) return 0x10002; if (b2==0x4B) return 0x10003; if (b2==0x4D) return 0x10004; return -1; }
+    }
+    if (b>=0x80) return -1; /* break code */
+    if (b==0x1C) return '\r'; if (b==0x0E) return 0x08; if (b==0x01) return 0x1B; if (b==0x0F) return '\t';
+    { char c=gui_scancode_to_ascii(b); if (c) return (int)c; }
+    return -1;
+}
 static void gui_run_fse(const char *name)
 {
     const uint8_t *data=0; uint32_t len=0; int rc;
     gui_mode=MODE_TERMINAL; gui_win_title=name; gui_win_visible=1; gui_term_lines=0; gui_input_len=0; gui_input[0]=0;
     gui_term_push("RUNNING FSE - REAL RUN"); gui_term_push(name);
     if (!fse_embedded_find(name, &data, &len)) { gui_term_push("FSE NOT EMBEDDED"); gui_draw_content_only(); return; }
-    proc_set_gui_print(gui_fse_print); proc_set_gui_read_key(gui_fse_read_key);
+    gui_fse_pending_e0 = 0;
+    proc_set_gui_print(gui_fse_print); proc_set_gui_read_key(gui_fse_read_key); proc_set_gui_poll_key(gui_fse_poll_key);
     rc = proc_run_fse(data, len);
-    proc_set_gui_print(0); proc_set_gui_read_key(0);
+    proc_set_gui_print(0); proc_set_gui_read_key(0); proc_set_gui_poll_key(0);
     { char buf[32]; int j=0, v=rc; char rev[16]; int r=0; if (v<0) { buf[j++]='-'; v=-v; } if (v==0) buf[j++]='0'; else { while (v>0 && r<12) { rev[r++]=(char)('0'+v%10); v/=10; } while (r>0) buf[j++]=rev[--r]; } buf[j]=0; gui_term_push("FSE EXITED CODE"); gui_term_push(buf); }
     gui_term_push("ESC TO CLOSE"); gui_draw_content_only();
 }
@@ -1186,7 +1353,9 @@ int gui_poll_input(void)
     status = gui_inb(0x64); if (!(status & 0x01)) return 0; byte = gui_inb(0x60);
     if (status & 0x20) {
         if (pkt_idx==0 && !(byte & 0x08)) return 0; pkt[pkt_idx++]=byte; if (pkt_idx<3) return 0; pkt_idx=0;
-        { int left=pkt[0]&0x01; int dx=(int8_t)pkt[1]; int dy=(int8_t)pkt[2]; gui_mouse_move(dx,-dy); if (left && !gui_prev_left) gui_mouse_click(1); else if (!left) gui_prev_left=0; /* No gui_draw(): mouse_move already updated, click already drew. */ return 1; }
+        { int left=pkt[0]&0x01; int dx=(int8_t)pkt[1]; int dy=(int8_t)pkt[2]; gui_mouse_move(dx,-dy); if (left && !gui_prev_left) gui_mouse_click(1); else if (!left) { gui_prev_left=0; gui_pointer_held=0;
+            gui_lvgl_feed_release();
+        } /* No gui_draw(): mouse_move already updated, click already drew. */ return 1; }
     } else {
         /* Extended scancodes: PS/2 arrows are E0 48/50/4B/4D.
          * The old code ignored E0, so arrows did nothing. */
@@ -1214,7 +1383,9 @@ int gui_poll_input(void)
         if (byte==0x01) { /* Esc: close menu, then window, not just log it. */
             if (gui_menu_open) { gui_menu_open=0; gui_draw_menu_only(); }
             else if (gui_start_open) { gui_start_open=0; gui_draw_taskbar_only(); }
-            else if (gui_win_visible) { int was_pong=(gui_mode==MODE_PONG); gui_win_visible=0; if (was_pong) gui_snap_apply(0); gui_draw_close_window(); }
+            else if (gui_win_visible) { int was_pong=(gui_mode==MODE_PONG); gui_win_visible=0; if (was_pong) gui_snap_apply(0); gui_draw_close_window();
+                gui_lvgl_resume_if_suspended();
+            }
             gui_serial("[FisixOS] GUI_KEY_ESC_CLOSE\n");
         }
         else if (byte==0x0F) { /* Tab: jump to menu, then START, then taskbar. */

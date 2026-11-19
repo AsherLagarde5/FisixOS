@@ -46,7 +46,7 @@
 
 #define FISIX_FSE_MAGIC 0x31455346u
 #define FISIX_FSE_VERSION 1
-#define FISIX_FSE_API_VERSION 2
+#define FISIX_FSE_API_VERSION 3
 #define FISIX_FSE_LOAD_ADDRESS 0x300000ULL
 #define FISIX_FSE_HEADER_SIZE 64
 #define FISIX_FSE_MAX_CODE_SIZE (256 * 1024)
@@ -85,7 +85,13 @@ typedef struct fisix_api {
        be read as a regular file. get_time fills all six fields
        from the firmware clock (0 if the clock is unavailable).
        clear_screen clears the text screen; sleep_ms stalls for
-       approximately that many milliseconds (firmware Stall). */
+       approximately that many milliseconds (firmware Stall).
+       API v3, appended only, so v1/v2 programs still work:
+       poll_key returns a key code like read_key, or -1 if no
+       key is waiting, without blocking. This is what makes
+       real-time programs possible: the original CliPong polls
+       keys every 10 ms and ticks the ball every 45 ms, which
+       was impossible with blocking read_key alone. */
     int (*dir_list)(const char *path, char *buf, unsigned int buf_size);
     int (*file_delete)(const char *path);
     int (*file_rename)(const char *old_path, const char *new_path);
@@ -96,6 +102,7 @@ typedef struct fisix_api {
                      unsigned int *hour, unsigned int *minute, unsigned int *second);
     void (*clear_screen)(void);
     void (*sleep_ms)(unsigned int ms);
+    int (*poll_key)(void);
 } fisix_api_t;
 
 typedef int (*fse_entry_t)(fisix_api_t *api);

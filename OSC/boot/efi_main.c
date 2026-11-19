@@ -4,6 +4,12 @@
 #include "memory.h"
 #include "accounts.h"
 #include "fse.h"
+#include "part.h"
+#include "fat.h"
+#include "block.h"
+#include "bootcfg.h"
+#include "ntfs.h"
+#include <cpuid.h>
 #include "../kernel/boot_info.h"
 
 EFI_HANDLE gImageHandle;
@@ -537,6 +543,9 @@ cleanup:
 }
 
 static int terminal_execute_command(const CHAR16 *command);
+static void terminal_part_command(CHAR16 *argv[], int argc);
+static void terminal_boot_command(CHAR16 *argv[], int argc);
+static void terminal_ntfs_command(CHAR16 *argv[], int argc);
 
 #define TERMINAL_MAX_ARGS 8
 #define TERMINAL_MAX_LINE 128
@@ -1006,6 +1015,22 @@ static int fse_api_read_key(void)
         if (key.ScanCode) return (int)(0x10000 + key.ScanCode);
     }
 }
+/* API v3: one non-blocking poll. ReadKeyStroke returns an error
+ * (EFI_NOT_READY) when no key is waiting, so a single call that
+ * does not loop is exactly a poll. -1 means "no key", never a
+ * valid key code, matching the kernel's poll_key. */
+static int fse_api_poll_key(void)
+{
+    EFI_INPUT_KEY key;
+    EFI_STATUS st;
+    if (!gST || !gST->ConIn || !gST->ConIn->ReadKeyStroke) return -1;
+    key.UnicodeChar = 0; key.ScanCode = 0;
+    st = gST->ConIn->ReadKeyStroke(gST->ConIn, &key);
+    if (EFI_ERROR(st)) return -1;
+    if (key.UnicodeChar) return (int)key.UnicodeChar;
+    if (key.ScanCode) return (int)(0x10000 + key.ScanCode);
+    return -1;
+}
 static int fse_ascii_to_char16(const char *s, CHAR16 *out, size_t max)
 {
     size_t i = 0;
@@ -1205,7 +1230,7 @@ static void fse_api_sleep_ms(unsigned int ms)
 }
 static fisix_api_t fse_api = { fse_api_print, fse_api_print_u64, fse_api_print_newline, fse_api_read_key, fse_api_file_read, fse_api_file_write,
     fse_api_dir_list, fse_api_file_delete, fse_api_file_rename, fse_api_file_mkdir, fse_api_file_exists, fse_api_file_size,
-    fse_api_get_time, fse_api_clear_screen, fse_api_sleep_ms };
+    fse_api_get_time, fse_api_clear_screen, fse_api_sleep_ms, fse_api_poll_key };
 
 static int fse_run_file(const CHAR16 *path)
 {
@@ -1225,7 +1250,7 @@ static int fse_run_file(const CHAR16 *path)
     count = sizeof(hdr);
     st = file->Read(file, &count, &hdr);
     if (EFI_ERROR(st) || count != sizeof(hdr)) { terminal_write_ascii_line("fse: could not read header."); file->Close(file); return 0; }
-    if (hdr.magic != FISIX_FSE_MAGIC || hdr.version != FISIX_FSE_VERSION || hdr.api_version > 2 ||
+    if (hdr.magic != FISIX_FSE_MAGIC || hdr.version != FISIX_FSE_VERSION || hdr.api_version > 3 ||
         hdr.entry_offset < FISIX_FSE_HEADER_SIZE || hdr.entry_offset >= FISIX_FSE_HEADER_SIZE + hdr.code_size ||
         hdr.code_size == 0 || hdr.code_size > FISIX_FSE_MAX_CODE_SIZE) {
         terminal_write_ascii_line("fse: bad header (not a Fisix .fse v1 file?).");
@@ -1339,6 +1364,21 @@ static int terminal_execute_command(const CHAR16 *command)
         return 0;
     }
 
+    if (terminal_match_command(argv[0], (const CHAR16[]){ 'p','a','r','t',0 })) {
+        terminal_part_command(argv, argc);
+        return 0;
+    }
+
+    if (terminal_match_command(argv[0], (const CHAR16[]){ 'n','t','f','s',0 })) {
+        terminal_ntfs_command(argv, argc);
+        return 0;
+    }
+
+    if (terminal_match_command(argv[0], (const CHAR16[]){ 'b','o','o','t',0 })) {
+        terminal_boot_command(argv, argc);
+        return 0;
+    }
+
     if (terminal_match_command(argv[0], (const CHAR16[]){ 'r','u','n',0 })) {
         if (argc != 2) { terminal_write_ascii_line("usage: run <file.fse>"); return 0; }
         fse_run_file(argv[1]);
@@ -1359,7 +1399,7 @@ static int terminal_execute_command(const CHAR16 *command)
             ' ','e','x','i','t',',',' ','s','h','u','t','d','o','w','n',',',' ','r','e','b','o','o','t',',',
             ' ','t','y','p','e',',',' ','s','e','t',',',' ','t','i','m','e',',',' ','d','a','t','e',',',
             ' ','c','d',',',' ','c','o','p','y',',',' ','d','e','l',',',' ','r','e','n',',',' ','m','d',',',' ','r','d',',',
-            ' ','p','a','t','h',',',' ','w','h','o','a','m','i',',',' ','p','w','d',',',' ','s','w','i','t','c','h','l','a','n','g',',',' ','i','n','s','t','a','l','l',',',' ','g','u','i',',',' ','r','u','n',' ','<','f','i','l','e','.','f','s','e','>',0
+            ' ','p','a','t','h',',',' ','w','h','o','a','m','i',',',' ','p','w','d',',',' ','s','w','i','t','c','h','l','a','n','g',',',' ','i','n','s','t','a','l','l',',',' ','p','a','r','t',',',' ','n','t','f','s',',',' ','b','o','o','t',',',' ','g','u','i',',',' ','r','u','n',' ','<','f','i','l','e','.','f','s','e','>',0
         });
         return 0;
     }
@@ -1903,8 +1943,20 @@ static int terminal_login(void)
 
 typedef void (*kernel_entry_t)(const kernel_boot_info_t *boot_info);
 
+/* The loader reads at most this many bytes of kernel.bin: the
+ * file is silently truncated past the cap, so the cap MUST stay
+ * above the real kernel size. History: the LVGL=1 kernel grew
+ * past 1 MiB (1.72 MB) while the cap was still 1 MiB, so the
+ * loader only read the first megabyte and the kernel booted
+ * with the tail of its .data/.rodata missing — the exact
+ * pre-existing LVGL=1 boot fault (a #PF in .data among the
+ * gui_win_norm_* variables, before ring3_init). The embedded
+ * .deb files (hello + libc6, ~3.6 MB) push the kernel to
+ * ~4.5 MB (LVGL=0) / ~5.3 MB (LVGL=1); 8 MiB covers that with
+ * headroom. If the kernel ever outgrows the cap again, the
+ * loader must fail loudly instead of truncating. */
 #define KERNEL_LOAD_ADDRESS 0x200000ULL
-#define KERNEL_MAX_BYTES    (1024ULL * 1024ULL)
+#define KERNEL_MAX_BYTES    (8ULL * 1024ULL * 1024ULL)
 
 static EFI_STATUS efi_load_kernel(void)
 {
@@ -2021,6 +2073,7 @@ static EFI_STATUS efi_leave_boot_services(kernel_boot_info_t *boot_info)
 
         total_memory = 0;
         cursor = memory_map_buffer;
+        boot_info->mem_range_count = 0;
         for (size_t i = 0; i < memory_map_size / descriptor_size; ++i) {
             EFI_MEMORY_DESCRIPTOR *descriptor = (EFI_MEMORY_DESCRIPTOR *)cursor;
             if (descriptor->Type == EfiConventionalMemory ||
@@ -2029,6 +2082,20 @@ static EFI_STATUS efi_leave_boot_services(kernel_boot_info_t *boot_info)
                 descriptor->Type == EfiBootServicesCode ||
                 descriptor->Type == EfiBootServicesData) {
                 total_memory += descriptor->NumberOfPages * 4096ULL;
+            }
+            /* Copy the map into boot_info for the kernel frame
+             * allocator (ring-3 work). All types are recorded,
+             * not just conventional memory, so the kernel can
+             * tell reserved/ACPI regions apart from free RAM.
+             * Capped at KERNEL_MAX_MEM_RANGES; a bigger map
+             * just loses its tail, and the allocator only uses
+             * conventional ranges anyway. */
+            if (boot_info->mem_range_count < KERNEL_MAX_MEM_RANGES) {
+                kernel_mem_range_t *r =
+                    &boot_info->mem_ranges[boot_info->mem_range_count++];
+                r->base = descriptor->PhysicalStart;
+                r->pages = descriptor->NumberOfPages;
+                r->type = (uint32_t)descriptor->Type;
             }
             cursor += descriptor_size;
         }
@@ -2275,6 +2342,104 @@ static void boot_chainload(int efi_index)
     gBS->FreePool(buf);
     (void)st;
 }
+/* ---- Multi-boot: OS labels + saved boot choice (BOOT.CFG) ----
+   The menu used to print every non-FisixOS EFI file as a bare
+   "Boot <path>". Now each one gets an OS label (Windows / Linux
+   distro / Other UEFI) from its path, so a disk with Windows,
+   Linux and FisixOS side by side reads as three operating
+   systems, not three file paths. The saved default + timeout
+   come from \FISIXOS\BOOT.CFG on the boot ESP (see bootcfg.h):
+   the file is read here, before the prompt, and the countdown
+   boots the default unless any key is pressed. FisixOS never
+   rewrites the firmware BootOrder - this only picks among the
+   entries its own menu already shows. */
+static int boot_contains_ci(const char *s, const char *needle)
+{
+    size_t nlen = 0, i;
+    if (!s || !needle) return 0;
+    while (needle[nlen]) nlen++;
+    if (nlen == 0) return 1;
+    for (i = 0; s[i]; i++) {
+        size_t k = 0;
+        while (k < nlen && s[i+k]) {
+            char a = s[i+k], b = needle[k];
+            if (a >= 'a' && a <= 'z') a = (char)(a - 'a' + 'A');
+            if (b >= 'a' && b <= 'z') b = (char)(b - 'a' + 'A');
+            if (a != b) break;
+            k++;
+        }
+        if (k == nlen) return 1;
+    }
+    return 0;
+}
+static void boot_os_label(const char *ascii_path, char *label, size_t cap)
+{
+    const char *l = "Other EFI";
+    size_t i = 0;
+    if (!ascii_path || !label || cap == 0) return;
+    if (boot_contains_ci(ascii_path, "MICROSOFT")) l = "Windows Boot Manager";
+    else if (boot_contains_ci(ascii_path, "UBUNTU")) l = "Linux (Ubuntu)";
+    else if (boot_contains_ci(ascii_path, "DEBIAN")) l = "Linux (Debian)";
+    else if (boot_contains_ci(ascii_path, "FEDORA")) l = "Linux (Fedora)";
+    else if (boot_contains_ci(ascii_path, "GRUB")) l = "Linux (GRUB)";
+    else if (boot_contains_ci(ascii_path, "SHIMX64")) l = "Linux";
+    while (l[i] && i + 1 < cap) { label[i] = l[i]; i++; }
+    label[i] = 0;
+}
+static void boot_load_cfg(bootcfg_t *cfg)
+{
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs = 0;
+    EFI_FILE_PROTOCOL *root = 0, *file = 0;
+    char text[256];
+    UINTN count = sizeof(text) - 1;
+    bootcfg_defaults(cfg);
+    if (boot_boot_fs < 0 || boot_boot_fs >= boot_fs_count) return;
+    fs = boot_fss[boot_boot_fs].fs;
+    if (!fs || EFI_ERROR(fs->OpenVolume(fs, &root)) || !root) return;
+    if (EFI_ERROR(root->Open(root, &file, (const CHAR16[]){'\\','F','I','S','I','X','O','S','\\','B','O','O','T','.','C','F','G',0}, EFI_FILE_MODE_READ, 0)) || !file) { root->Close(root); return; }
+    if (!EFI_ERROR(file->Read(file, &count, text))) { text[count] = 0; bootcfg_parse(text, cfg); }
+    file->Close(file); root->Close(root);
+}
+/* Read a menu choice line, honouring BOOT.CFG: with timeout 0
+ * this is just terminal_read_line. With a timeout, it counts
+ * down once a second (any key cancels the countdown and drops
+ * to a normal prompt); on expiry it returns the saved default
+ * as if the user had typed it (default 0 = Enter, i.e. an
+ * empty line). Returns the line length like terminal_read_line. */
+static int boot_menu_read_line(CHAR16 *line, int menu_total)
+{
+    bootcfg_t bcfg;
+    int secs_left, pressed = 0, dc;
+    boot_load_cfg(&bcfg);
+    if (bcfg.timeout_secs <= 0) return terminal_read_line(line, 32);
+    dc = bcfg.default_choice;
+    if (dc < 0 || dc > menu_total) dc = 0;
+    secs_left = bcfg.timeout_secs;
+    while (secs_left > 0 && !pressed) {
+        int tick;
+        install_write_num("Auto-boot in ", (uint64_t)secs_left, "s - press any key for menu");
+        for (tick = 0; tick < 10 && !pressed; tick++) {
+            EFI_INPUT_KEY key;
+            if (gBS->Stall) { typedef EFI_STATUS (EFIAPI *fisix_stall_t)(UINTN Microseconds); ((fisix_stall_t)gBS->Stall)(100000); }
+            if (gST && gST->ConIn && gST->ConIn->ReadKeyStroke) {
+                EFI_STATUS st = gST->ConIn->ReadKeyStroke(gST->ConIn, &key);
+                if (!EFI_ERROR(st) && (key.UnicodeChar || key.ScanCode)) pressed = 1;
+            }
+        }
+        secs_left--;
+    }
+    if (!pressed) {
+        if (dc == 0) { line[0] = 0; return 0; }
+        { char tmp[8]; int n = 0, i; int v = dc;
+          if (v == 0) tmp[n++] = '0';
+          while (v > 0) { tmp[n++] = (char)('0' + (v % 10)); v /= 10; }
+          for (i = 0; i < n; i++) line[i] = (CHAR16)tmp[n - 1 - i];
+          line[n] = 0;
+          return n; }
+    }
+    return terminal_read_line(line, 32);
+}
+
 /* 2026-10-30 auto-boot fix: the GUI is the kernel (kernel_startup
    -> GUI loop), not the loader. Before this, every normal boot
    stopped in the loader shell and waited for the user to type
@@ -2328,11 +2493,186 @@ static int fisix_ram_check_and_copy(void)
     serial_mark("RAM_MODE_COPY_DONE");
     return 1;
 }
+
+/* ============ Minimum requirements enforcement, 2026-11-19 ============
+   Asher's minimums (docs/MINIMUM-REQUIREMENTS.md): 128 MB RAM,
+   a 1 GB disk, any 64-bit x86 CPU, a display with at least
+   32 colors, and a GPU able to render 32 colors at a solid
+   32 FPS. This runs in the bootloader menu, before a GUI boot
+   (Installed / Liveboot / RAM Mode), and again as a backstop
+   in efi_main before the kernel loads (for the terminal-shell
+   "gui" path, which bypasses the menu). A failure prints
+   exactly which requirement failed and returns to the menu
+   instead of booting — it never hangs silently.
+   NOT enforced here: terminal shell mode, the Installer
+   (the machine you install FROM is not the machine that
+   will run it), and chainloading another OS.
+   How each one is measured, honestly:
+   - RAM: GetMemoryMap, same sum as efi_leave_boot_services.
+   - Disk: the LARGEST whole BlockIO disk present (not a
+     partition, must be present). This is a machine minimum:
+     the boot media itself can be small — the 22 MB ISO and
+     the small QEMU test disks are boot media, not the
+     machine's storage. `make run` / `make run-iso` attach
+     a 1 GB sparse test disk so the test VM meets it.
+   - CPU: CPUID leaf 0x80000001, EDX bit 29 (long mode).
+     This code only runs at all as a 64-bit UEFI app, so
+     this is a belt-and-braces check, not the only one.
+   - Colors: current GOP mode PixelFormat. 8-bit RGB/BGR
+     formats are 16.7M colors (pass); BitMask counts the
+     bits in the R+G+B masks (need >= 5 bits = 32 colors);
+     BltOnly has no framebuffer (fail).
+   - FPS: measured, not assumed. TSC is calibrated against
+     BootServices Stall (100 ms), then 32 full-screen
+     framebuffer fills are timed with RDTSC. There is no
+     GPU driver yet (GOP framebuffer only), so this measures
+     the framebuffer path — a machine whose framebuffer
+     cannot hold 32 FPS in 32 colors fails. If there is no
+     Stall or no TSC, FPS cannot be measured: it prints a
+     warning and passes rather than bricking the boot. */
+#define FISIX_MIN_RAM_BYTES (128ULL * 1024ULL * 1024ULL)
+#define FISIX_MIN_DISK_BYTES (1024ULL * 1024ULL * 1024ULL)
+#define FISIX_MIN_COLORS 32
+#define FISIX_MIN_FPS 32
+
+static uint64_t fisix_minreq_total_ram(void)
+{
+    static uint8_t mm_buf[128 * 1024];
+    size_t mm_size = sizeof(mm_buf), map_key = 0, desc_size = 0; uint32_t desc_ver = 0; EFI_STATUS st;
+    uint64_t total = 0; uint8_t *cur; size_t i;
+    if (!gBS || !gBS->GetMemoryMap) return 0;
+    st = ((EFI_GET_MEMORY_MAP)gBS->GetMemoryMap)(&mm_size, (EFI_MEMORY_DESCRIPTOR *)mm_buf, &map_key, &desc_size, &desc_ver);
+    if (EFI_ERROR(st) || desc_size == 0) return 0;
+    cur = mm_buf;
+    for (i = 0; i < mm_size / desc_size; i++) { EFI_MEMORY_DESCRIPTOR *d = (EFI_MEMORY_DESCRIPTOR *)cur; if (d->Type == EfiConventionalMemory || d->Type == EfiLoaderCode || d->Type == EfiLoaderData || d->Type == EfiBootServicesCode || d->Type == EfiBootServicesData) total += d->NumberOfPages * 4096ULL; cur += desc_size; }
+    return total;
+}
+
+static uint64_t fisix_minreq_largest_disk_bytes(void)
+{
+    EFI_LOCATE_HANDLE_BUFFER_FN locate_buf;
+    EFI_HANDLE_PROTOCOL_FN handle_proto;
+    EFI_HANDLE *handles = 0; UINTN handle_count = 0; uint64_t best = 0; int i;
+    if (!gBS) return 0;
+    locate_buf = (EFI_LOCATE_HANDLE_BUFFER_FN)gBS->LocateHandleBuffer;
+    handle_proto = (EFI_HANDLE_PROTOCOL_FN)gBS->HandleProtocol;
+    if (!locate_buf || !handle_proto) return 0;
+    if (EFI_ERROR(locate_buf(2, &EFI_BLOCK_IO_PROTOCOL_GUID, 0, &handle_count, &handles)) || !handles) return 0;
+    for (i = 0; (UINTN)i < handle_count; i++) {
+        EFI_BLOCK_IO_PROTOCOL *b = 0; uint64_t bytes;
+        if (EFI_ERROR(handle_proto(handles[i], &EFI_BLOCK_IO_PROTOCOL_GUID, (void **)&b)) || !b || !b->Media) continue;
+        if (b->Media->LogicalPartition || !b->Media->MediaPresent || b->Media->BlockSize == 0) continue;
+        if (b->Media->LastBlock > 0xFFFFFFFFULL / b->Media->BlockSize) bytes = 0xFFFFFFFFFFFFFFFFULL;
+        else bytes = (b->Media->LastBlock + 1) * b->Media->BlockSize;
+        if (bytes > best) best = bytes;
+    }
+    if (gBS->FreePool) gBS->FreePool(handles);
+    return best;
+}
+
+static int fisix_minreq_cpu_ok(void)
+{
+    unsigned int a, b, c, d;
+    if (!__get_cpuid(0x80000001u, &a, &b, &c, &d)) return 0;
+    return (d & (1u << 29)) != 0; /* long mode */
+}
+
+static uint32_t fisix_minreq_color_count(void)
+{
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = 0; EFI_STATUS st; uint32_t fmt, bits = 0; int i, j;
+    if (!gBS || !gBS->LocateProtocol) return 0;
+    st = gBS->LocateProtocol(&EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, 0, (void **)&gop);
+    if (EFI_ERROR(st) || !gop || !gop->Mode || !gop->Mode->Info) return 0;
+    fmt = gop->Mode->Info->PixelFormat;
+    if (fmt == 0 || fmt == 1) return 16777216; /* 8-bit RGB / BGR */
+    if (fmt == 2) { /* BitMask: count R+G+B mask bits */
+        for (i = 0; i < 3; i++) { uint32_t m = gop->Mode->Info->PixelInformation[i]; for (j = 0; j < 32; j++) if (m & (1u << j)) bits++; }
+        if (bits >= 24) return 16777216;
+        if (bits == 0) return 0;
+        return 1u << bits;
+    }
+    return 0; /* BltOnly (3) and anything else: no direct framebuffer */
+}
+
+static uint64_t fisix_minreq_rdtsc(void)
+{
+    uint32_t lo, hi;
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+/* 1 = passes 32 FPS, 0 = fails, -1 = cannot measure. */
+static int fisix_minreq_fps_ok(void)
+{
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = 0; EFI_STATUS st;
+    uint64_t w, h, pitch, ticks_per_sec, t0, t1, f0, f1, elapsed, fps;
+    volatile uint32_t *fb; uint32_t y, x; int fill;
+    if (!gBS || !gBS->LocateProtocol || !gBS->Stall) return -1;
+    st = gBS->LocateProtocol(&EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, 0, (void **)&gop);
+    if (EFI_ERROR(st) || !gop || !gop->Mode || !gop->Mode->FrameBufferBase || !gop->Mode->Info) return -1;
+    w = gop->Mode->Info->HorizontalResolution; h = gop->Mode->Info->VerticalResolution;
+    pitch = gop->Mode->Info->PixelsPerScanLine;
+    if (w == 0 || h == 0 || pitch < w || w * h > 16ULL * 1024ULL * 1024ULL) return -1;
+    fb = (volatile uint32_t *)(uintptr_t)gop->Mode->FrameBufferBase;
+    /* Calibrate TSC against a 100 ms Stall. */
+    t0 = fisix_minreq_rdtsc();
+    { typedef EFI_STATUS (EFIAPI *fisix_stall_t)(UINTN Microseconds); ((fisix_stall_t)gBS->Stall)(100000); }
+    t1 = fisix_minreq_rdtsc();
+    if (t1 <= t0) return -1;
+    ticks_per_sec = (t1 - t0) * 10;
+    /* Time 32 full-screen black fills. */
+    f0 = fisix_minreq_rdtsc();
+    for (fill = 0; fill < 32; fill++)
+        for (y = 0; y < (uint32_t)h; y++)
+            for (x = 0; x < (uint32_t)w; x++) fb[(uint64_t)y * pitch + x] = 0;
+    f1 = fisix_minreq_rdtsc();
+    if (f1 <= f0) return -1;
+    elapsed = f1 - f0;
+    fps = (32ULL * ticks_per_sec) / elapsed;
+    return fps >= FISIX_MIN_FPS ? 1 : 0;
+}
+
+static int fisix_minreq_checked = 0;
+
+static int fisix_check_minimum_requirements(void)
+{
+    uint64_t ram, disk; uint32_t colors; int fps; int cpu_ok; int ok = 1; char num[24];
+    fisix_minreq_checked = 1;
+    terminal_write_ascii_line("Checking minimum requirements...");
+    ram = fisix_minreq_total_ram();
+    install_u64_to_ascii(ram / (1024 * 1024), num, sizeof(num));
+    terminal_write_ascii("  RAM: "); terminal_write_ascii(num); terminal_write_ascii_line(" MB (need 128 MB)");
+    if (ram < FISIX_MIN_RAM_BYTES) { terminal_write_ascii_line("  FAIL: need at least 128 MB RAM"); serial_mark("MINREQ_FAIL_RAM"); ok = 0; }
+    disk = fisix_minreq_largest_disk_bytes();
+    install_u64_to_ascii(disk / (1024 * 1024), num, sizeof(num));
+    terminal_write_ascii("  Largest disk: "); terminal_write_ascii(num); terminal_write_ascii_line(" MB (need 1 GB)");
+    if (disk < FISIX_MIN_DISK_BYTES) { terminal_write_ascii_line("  FAIL: need a disk of at least 1 GB"); serial_mark("MINREQ_FAIL_DISK"); ok = 0; }
+    cpu_ok = fisix_minreq_cpu_ok();
+    terminal_write_ascii_line(cpu_ok ? "  CPU: 64-bit x86 (long mode) OK" : "  FAIL: CPU is not 64-bit x86 (no long mode)");
+    if (!cpu_ok) { serial_mark("MINREQ_FAIL_CPU"); ok = 0; }
+    colors = fisix_minreq_color_count();
+    install_u64_to_ascii(colors, num, sizeof(num));
+    terminal_write_ascii("  Display colors: "); terminal_write_ascii(num); terminal_write_ascii_line(" (need 32)");
+    if (colors < FISIX_MIN_COLORS) { terminal_write_ascii_line("  FAIL: display must support at least 32 colors"); serial_mark("MINREQ_FAIL_COLORS"); ok = 0; }
+    fps = fisix_minreq_fps_ok();
+    if (fps < 0) terminal_write_ascii_line("  FPS: could not measure (no timer), continuing");
+    else if (fps == 0) { terminal_write_ascii_line("  FAIL: GPU must render 32 colors at a solid 32 FPS"); serial_mark("MINREQ_FAIL_FPS"); ok = 0; }
+    else terminal_write_ascii_line("  FPS: 32 colors at 32 FPS OK");
+    if (!ok) {
+        terminal_write_ascii_line("DOES NOT MEET MINIMUM REQUIREMENTS - FisixOS will not boot on this machine.");
+        serial_mark("MINREQ_FAIL");
+        return 0;
+    }
+    terminal_write_ascii_line("  Minimum requirements: OK");
+    serial_mark("MINREQ_OK");
+    return 1;
+}
+
 static int boot_run_menu(void)
 {
     for (;;) {
         int installed[16], installed_count = 0, other[32], other_count = 0;
-        int i, live_num, install_num, ram_num, choice_num;
+        int i, live_num, install_num, ram_num, choice_num, menu_total = 0;
         CHAR16 line[32];
         uint64_t choice = 0;
         boot_clear_screen();
@@ -2395,14 +2735,18 @@ static int boot_run_menu(void)
             install_write_num("", (uint64_t)ram_num, "");
             terminal_write_ascii_line("FisixOS - RAM Mode (complete RAM, remove drive, gone on reboot)");
             for (i = 0; i < other_count; i++) {
+                char lbl[32];
                 install_write_num("", (uint64_t)n, "");
-                terminal_write_ascii("Boot ");
+                boot_os_label(boot_efis[other[i]].ascii, lbl, sizeof(lbl));
+                terminal_write_ascii(lbl);
+                terminal_write_ascii(" - ");
                 terminal_write_ascii(boot_efis[other[i]].ascii);
                 terminal_write_ascii(" (Disk ");
                 { char d[4]; d[0] = (char)('0' + boot_efis[other[i]].fs_index); d[1] = 0; terminal_write_ascii(d); }
                 terminal_write_ascii_line(")");
                 n++;
             }
+            menu_total = n - 1;
             terminal_write_ascii_line("  0) FisixOS terminal (shell, type gui to start GUI)");
         terminal_write_ascii_line("  Enter / Installed / Live boot straight to the GUI after login.");
 #if !FISIX_INSTALLED_BUILD
@@ -2411,8 +2755,9 @@ static int boot_run_menu(void)
         }
         terminal_write_ascii_line("");
         terminal_write_ascii("Choice (Enter = Installed, else normal): ");
-        if (terminal_read_line(line, 32) == 0 || line[0] == 0) {
+        if (boot_menu_read_line(line, menu_total) == 0 || line[0] == 0) {
             if (installed_count > 0) {
+                if (!fisix_check_minimum_requirements()) { terminal_write_ascii_line("Press Enter to return to the bootloader menu."); terminal_read_line(line, 32); continue; }
                 fisix_selected_fs = boot_fss[installed[0]].fs;
                 fisix_live_boot = 0;
                 fisix_terminal_mode = 0;
@@ -2437,6 +2782,7 @@ static int boot_run_menu(void)
             return 0;
         }
         if (choice_num >= 1 && choice_num <= installed_count) {
+            if (!fisix_check_minimum_requirements()) { terminal_write_ascii_line("Press Enter to return to the bootloader menu."); terminal_read_line(line, 32); continue; }
             fisix_selected_fs = boot_fss[installed[choice_num - 1]].fs;
             fisix_live_boot = 0;
             fisix_terminal_mode = 0;
@@ -2445,6 +2791,7 @@ static int boot_run_menu(void)
             return 0;
         }
         if (choice_num == live_num) {
+            if (!fisix_check_minimum_requirements()) { terminal_write_ascii_line("Press Enter to return to the bootloader menu."); terminal_read_line(line, 32); continue; }
             fisix_selected_fs = (boot_boot_fs >= 0) ? boot_fss[boot_boot_fs].fs : 0;
             fisix_live_boot = 1;
             fisix_terminal_mode = 0;
@@ -2464,6 +2811,7 @@ static int boot_run_menu(void)
         }
         if (choice_num == ram_num) {
             fisix_selected_fs = (boot_boot_fs >= 0) ? boot_fss[boot_boot_fs].fs : 0;
+            if (!fisix_check_minimum_requirements()) { terminal_write_ascii_line("Press Enter to return to the bootloader menu."); terminal_read_line(line, 32); continue; }
             if (!fisix_ram_check_and_copy()) { terminal_write_ascii_line("Press Enter to return to the bootloader menu."); terminal_read_line(line, 32); continue; }
             fisix_live_boot = 1;
             fisix_ram_mode = 1;
@@ -2486,6 +2834,481 @@ static int boot_run_menu(void)
         }
         terminal_write_ascii_line("Invalid choice.");
     }
+}
+
+/* ---- `part` command: GPT/MBR partitioning from the loader ----
+   Runs before ExitBootServices, so it can use UEFI Block I/O
+   through the same fisix_block_dev_t interface the host test
+   uses with a file-backed disk. `part list` is read-only.
+   Anything that writes refuses the disk FisixOS booted from,
+   and mklabel/delete need a literal CONFIRM, so a typo cannot
+   wipe a disk. Growing/shrinking a partition only moves its
+   last LBA - the filesystem inside is NOT resized. */
+static void partcmd_to_ascii(const CHAR16 *s, char *out, size_t max)
+{
+    size_t i = 0;
+    if (!out || max == 0) return;
+    while (s && s[i] && i + 1 < max) { out[i] = (char)(uint8_t)s[i]; i++; }
+    out[i] = 0;
+}
+typedef struct { EFI_BLOCK_IO_PROTOCOL *bio; } partcmd_blk_t;
+static int partcmd_blk_read(void *ctx, uint64_t lba, uint32_t count, uint8_t *buf)
+{
+    partcmd_blk_t *b = (partcmd_blk_t *)ctx;
+    if (!b || !b->bio || !b->bio->Media || b->bio->Media->BlockSize != 512) return -1;
+    if (EFI_ERROR(b->bio->ReadBlocks(b->bio, b->bio->Media->MediaId, lba, (UINTN)count * 512, buf))) return -1;
+    return 0;
+}
+static int partcmd_blk_write(void *ctx, uint64_t lba, uint32_t count, const uint8_t *buf)
+{
+    partcmd_blk_t *b = (partcmd_blk_t *)ctx;
+    if (!b || !b->bio || !b->bio->Media || b->bio->Media->BlockSize != 512) return -1;
+    if (EFI_ERROR(b->bio->WriteBlocks(b->bio, b->bio->Media->MediaId, lba, (UINTN)count * 512, buf))) return -1;
+    return 0;
+}
+static int partcmd_make_dev(EFI_BLOCK_IO_PROTOCOL *bio, partcmd_blk_t *ctx, fisix_block_dev_t *dev)
+{
+    if (!bio || !bio->Media || bio->Media->BlockSize != 512) return -1;
+    ctx->bio = bio;
+    dev->sectors = bio->Media->LastBlock + 1;
+    dev->sector_size = 512;
+    dev->ctx = ctx; dev->read = partcmd_blk_read; dev->write = partcmd_blk_write; dev->flush = 0;
+    return 0;
+}
+static int partcmd_list_disks(EFI_BLOCK_IO_PROTOCOL *disks[16], uint64_t sizes_mb[16])
+{
+    EFI_HANDLE *handles = 0; UINTN handle_count = 0;
+    EFI_LOCATE_HANDLE_BUFFER_FN locate_buf;
+    EFI_HANDLE_PROTOCOL_FN handle_proto;
+    int disk_count = 0, i;
+    if (!gBS) return 0;
+    locate_buf = (EFI_LOCATE_HANDLE_BUFFER_FN)gBS->LocateHandleBuffer;
+    handle_proto = (EFI_HANDLE_PROTOCOL_FN)gBS->HandleProtocol;
+    if (!locate_buf || !handle_proto) return 0;
+    if (EFI_ERROR(locate_buf(2, &EFI_BLOCK_IO_PROTOCOL_GUID, 0, &handle_count, &handles)) || !handles) return 0;
+    for (i = 0; (UINTN)i < handle_count && disk_count < 16; i++) {
+        EFI_BLOCK_IO_PROTOCOL *b = 0;
+        if (EFI_ERROR(handle_proto(handles[i], &EFI_BLOCK_IO_PROTOCOL_GUID, (void **)&b)) || !b || !b->Media) continue;
+        if (b->Media->LogicalPartition || !b->Media->MediaPresent || b->Media->ReadOnly) continue;
+        if (b->Media->BlockSize != 512) continue;
+        disks[disk_count] = b;
+        sizes_mb[disk_count] = (b->Media->LastBlock + 1) * 512 / (1024 * 1024);
+        disk_count++;
+    }
+    if (gBS->FreePool) gBS->FreePool(handles);
+    return disk_count;
+}
+static int partcmd_is_boot_disk(EFI_BLOCK_IO_PROTOCOL *bio)
+{
+    return install_disk_is_boot_disk(bio, install_boot_partition_start());
+}
+static void partcmd_append(char *dst, size_t cap, int *pos, const char *s)
+{
+    while (s && *s && *pos + 1 < (int)cap) dst[(*pos)++] = *s++;
+    dst[*pos] = 0;
+}
+static void partcmd_append_u64(char *dst, size_t cap, int *pos, uint64_t v)
+{
+    char tmp[24];
+    install_u64_to_ascii(v, tmp, sizeof(tmp));
+    partcmd_append(dst, cap, pos, tmp);
+}
+static void partcmd_print_disk(int disk_no, EFI_BLOCK_IO_PROTOCOL *bio, uint64_t size_mb)
+{
+    partcmd_blk_t ctx; fisix_block_dev_t dev; part_table_t t; int r, i;
+    install_write_num("Disk ", (uint64_t)disk_no, "");
+    install_write_num("  size MB = ", size_mb, "");
+    if (partcmd_is_boot_disk(bio)) terminal_write_ascii_line("  (boot disk - writes refused here)");
+    if (partcmd_make_dev(bio, &ctx, &dev) != 0) { terminal_write_ascii_line("  (not a 512-byte-sector disk)"); return; }
+    r = part_probe(&dev, &t);
+    if (r != PART_OK) { terminal_write_ascii_line("  no partition table"); return; }
+    terminal_write_ascii_line(t.scheme == PART_SCHEME_GPT ? "  GPT:" : "  MBR:");
+    for (i = 0; i < t.count; i++) {
+        part_entry_t *e = &t.entries[i];
+        char type[32], line[192]; int p = 0;
+        part_type_name(e->type_guid, e->mbr_type, type, sizeof(type));
+        partcmd_append(line, sizeof(line), &p, "  [");
+        partcmd_append_u64(line, sizeof(line), &p, (uint64_t)e->index);
+        partcmd_append(line, sizeof(line), &p, "] ");
+        partcmd_append(line, sizeof(line), &p, type);
+        partcmd_append(line, sizeof(line), &p, " ");
+        partcmd_append_u64(line, sizeof(line), &p, e->first_lba);
+        partcmd_append(line, sizeof(line), &p, "-");
+        partcmd_append_u64(line, sizeof(line), &p, e->last_lba);
+        partcmd_append(line, sizeof(line), &p, " ");
+        partcmd_append_u64(line, sizeof(line), &p, (e->last_lba - e->first_lba + 1) / 2048);
+        partcmd_append(line, sizeof(line), &p, " MB");
+        if (e->bootable) partcmd_append(line, sizeof(line), &p, " BOOT");
+        if (e->name[0]) { partcmd_append(line, sizeof(line), &p, " \""); partcmd_append(line, sizeof(line), &p, e->name); partcmd_append(line, sizeof(line), &p, "\""); }
+        terminal_write_ascii_line(line);
+    }
+    if (t.count == 0) terminal_write_ascii_line("  (empty)");
+}
+static void terminal_part_command(CHAR16 *argv[], int argc)
+{
+    EFI_BLOCK_IO_PROTOCOL *disks[16]; uint64_t sizes_mb[16]; int nd, i;
+    if (argc < 2) {
+        terminal_write_ascii_line("usage: part list [disk] | part os");
+        terminal_write_ascii_line("       part mklabel <disk> gpt|mbr CONFIRM");
+        terminal_write_ascii_line("       part create <disk> esp|fisix|windows|linux|swap <sizeMB> [name]");
+        terminal_write_ascii_line("       part delete <disk> <idx> CONFIRM");
+        terminal_write_ascii_line("       part resize <disk> <idx> <newSizeMB>");
+        terminal_write_ascii_line("       part boot <disk> <idx>");
+        return;
+    }
+    if (install_equal_ascii(argv[1], "list")) {
+        nd = partcmd_list_disks(disks, sizes_mb);
+        if (nd == 0) { terminal_write_ascii_line("No whole disks found."); return; }
+        if (argc >= 3) {
+            uint64_t d;
+            if (!install_parse_u64(argv[2], &d) || d >= (uint64_t)nd) { terminal_write_ascii_line("Invalid disk number."); return; }
+            partcmd_print_disk((int)d, disks[d], sizes_mb[d]);
+            return;
+        }
+        for (i = 0; i < nd; i++) partcmd_print_disk(i, disks[i], sizes_mb[i]);
+        return;
+    }
+    if (install_equal_ascii(argv[1], "os")) {
+        int k;
+        boot_scan_all();
+        terminal_write_ascii_line("Operating systems found (by bootloader file):");
+        for (k = 0; k < boot_efi_count; k++) {
+            char lbl[32], line[192]; int p = 0;
+            boot_os_label(boot_efis[k].ascii, lbl, sizeof(lbl));
+            partcmd_append(line, sizeof(line), &p, "  Disk ");
+            partcmd_append_u64(line, sizeof(line), &p, (uint64_t)boot_efis[k].fs_index);
+            partcmd_append(line, sizeof(line), &p, ": ");
+            partcmd_append(line, sizeof(line), &p, lbl);
+            partcmd_append(line, sizeof(line), &p, " ");
+            partcmd_append(line, sizeof(line), &p, boot_efis[k].ascii);
+            terminal_write_ascii_line(line);
+        }
+        if (boot_efi_count == 0) terminal_write_ascii_line("  none - no EFI files found on any disk");
+        terminal_write_ascii_line("Pick one by number in the boot menu to chainload it.");
+        return;
+    }
+    /* Every command below writes: it needs a disk number first. */
+    nd = partcmd_list_disks(disks, sizes_mb);
+    if (argc < 3) { terminal_write_ascii_line("usage: part <list|os|mklabel|create|delete|resize|boot> ..."); return; }
+    {
+        uint64_t d;
+        partcmd_blk_t ctx; fisix_block_dev_t dev;
+        if (!install_parse_u64(argv[2], &d) || d >= (uint64_t)nd) { terminal_write_ascii_line("Invalid disk number."); return; }
+        if (partcmd_is_boot_disk(disks[d])) { terminal_write_ascii_line("That is the boot disk. Partition writes are refused on it."); return; }
+        if (partcmd_make_dev(disks[d], &ctx, &dev) != 0) { terminal_write_ascii_line("Not a 512-byte-sector disk."); return; }
+        if (install_equal_ascii(argv[1], "mklabel")) {
+            int r;
+            if (argc < 5 || !install_equal_ascii(argv[4], "CONFIRM")) { terminal_write_ascii_line("usage: part mklabel <disk> gpt|mbr CONFIRM (wipes the disk)"); return; }
+            if (install_equal_ascii(argv[3], "gpt")) r = part_create_gpt(&dev);
+            else if (install_equal_ascii(argv[3], "mbr")) r = part_create_mbr(&dev);
+            else { terminal_write_ascii_line("mklabel wants gpt or mbr."); return; }
+            terminal_write_ascii_line(r == PART_OK ? "Empty table written." : "Failed to write the table.");
+            return;
+        }
+        if (install_equal_ascii(argv[1], "create")) {
+            const uint8_t *guid = 0;
+            uint64_t mb; int idx, r;
+            char name[PART_NAME_MAX + 1];
+            part_table_t t;
+            if (argc < 5) { terminal_write_ascii_line("usage: part create <disk> esp|fisix|windows|linux|swap <sizeMB> [name]"); return; }
+            if (install_equal_ascii(argv[3], "esp")) guid = PART_GUID_ESP;
+            else if (install_equal_ascii(argv[3], "fisix")) guid = PART_GUID_FISIX_DATA;
+            else if (install_equal_ascii(argv[3], "windows")) guid = PART_GUID_MS_BASIC;
+            else if (install_equal_ascii(argv[3], "linux")) guid = PART_GUID_LINUX_FS;
+            else if (install_equal_ascii(argv[3], "swap")) guid = PART_GUID_LINUX_SWAP;
+            else { terminal_write_ascii_line("Unknown type: esp|fisix|windows|linux|swap."); return; }
+            if (!install_parse_u64(argv[4], &mb) || mb == 0) { terminal_write_ascii_line("Invalid size in MB."); return; }
+            name[0] = 0;
+            if (argc >= 6) partcmd_to_ascii(argv[5], name, sizeof(name));
+            if (part_probe(&dev, &t) != PART_OK || t.scheme != PART_SCHEME_GPT) { terminal_write_ascii_line("Disk has no GPT table - run part mklabel first."); return; }
+            r = part_add_size(&dev, guid, mb * 2048, name[0] ? name : 0, 0, &idx);
+            if (r == PART_OK) { install_write_num("Created partition index ", (uint64_t)idx, "."); }
+            else if (r == PART_ERR_NO_SPACE) terminal_write_ascii_line("Not enough free space on that disk.");
+            else if (r == PART_ERR_NO_SLOT) terminal_write_ascii_line("No free GPT entry (128 max).");
+            else terminal_write_ascii_line("Create failed.");
+            return;
+        }
+        if (install_equal_ascii(argv[1], "delete")) {
+            uint64_t idx; int r;
+            if (argc < 5 || !install_equal_ascii(argv[4], "CONFIRM")) { terminal_write_ascii_line("usage: part delete <disk> <idx> CONFIRM"); return; }
+            if (!install_parse_u64(argv[3], &idx)) { terminal_write_ascii_line("Invalid partition index."); return; }
+            r = part_delete(&dev, (int)idx);
+            terminal_write_ascii_line(r == PART_OK ? "Partition deleted." : "Delete failed (bad index?).");
+            return;
+        }
+        if (install_equal_ascii(argv[1], "resize")) {
+            uint64_t idx, mb; int r; part_table_t t; int j; uint64_t first = 0;
+            if (argc < 5) { terminal_write_ascii_line("usage: part resize <disk> <idx> <newSizeMB>"); return; }
+            if (!install_parse_u64(argv[3], &idx) || !install_parse_u64(argv[4], &mb) || mb == 0) { terminal_write_ascii_line("Invalid index or size."); return; }
+            if (part_probe(&dev, &t) != PART_OK) { terminal_write_ascii_line("No partition table on that disk."); return; }
+            for (j = 0; j < t.count; j++) if (t.entries[j].index == (int)idx) first = t.entries[j].first_lba;
+            if (first == 0) { terminal_write_ascii_line("Partition not found."); return; }
+            r = part_resize(&dev, (int)idx, first + mb * 2048 - 1);
+            if (r == PART_OK) terminal_write_ascii_line("Resized. NOTE: the filesystem inside was NOT resized.");
+            else if (r == PART_ERR_OVERLAP) terminal_write_ascii_line("Cannot grow: the space after it is not free.");
+            else terminal_write_ascii_line("Resize failed.");
+            return;
+        }
+        if (install_equal_ascii(argv[1], "boot")) {
+            uint64_t idx; int r;
+            if (argc < 4) { terminal_write_ascii_line("usage: part boot <disk> <idx>"); return; }
+            if (!install_parse_u64(argv[3], &idx)) { terminal_write_ascii_line("Invalid partition index."); return; }
+            r = part_set_boot(&dev, (int)idx);
+            terminal_write_ascii_line(r == PART_OK ? "Boot flag set on that partition (others cleared)." : "Set-boot failed (bad index?).");
+            return;
+        }
+        terminal_write_ascii_line("Unknown part command. Type part for usage.");
+    }
+}
+
+/* ---- `ntfs` command: read/write NTFS (Windows) volumes ----
+   Runs before ExitBootServices, so it can use UEFI Block I/O
+   for both reads AND writes (the kernel's NVMe driver has no
+   writes yet, so the kernel NTFS path is read-only for now).
+   `ntfs` with no arguments lists the NTFS volumes found.
+   Every subcommand re-scans and re-mounts, so the volume list
+   is never stale. Writes go through ntfs.c, which refuses
+   dirty and hibernated volumes and sets the $Volume dirty
+   flag around each mutation (see kernel/drivers/ntfs.h). */
+typedef struct { EFI_BLOCK_IO_PROTOCOL *bio; } ntfscmd_blk_t;
+static int ntfscmd_blk_read(void *ctx, uint64_t off, uint32_t len, uint8_t *buf)
+{
+    ntfscmd_blk_t *b = (ntfscmd_blk_t *)ctx;
+    if (!b || !b->bio || !b->bio->Media || b->bio->Media->BlockSize != 512) return -1;
+    if ((off % 512) || (len % 512)) return -1;
+    if (EFI_ERROR(b->bio->ReadBlocks(b->bio, b->bio->Media->MediaId, off / 512, (UINTN)len, buf))) return -1;
+    return 0;
+}
+static int ntfscmd_blk_write(void *ctx, uint64_t off, uint32_t len, const uint8_t *buf)
+{
+    ntfscmd_blk_t *b = (ntfscmd_blk_t *)ctx;
+    if (!b || !b->bio || !b->bio->Media || b->bio->Media->BlockSize != 512) return -1;
+    if ((off % 512) || (len % 512)) return -1;
+    if (EFI_ERROR(b->bio->WriteBlocks(b->bio, b->bio->Media->MediaId, off / 512, (UINTN)len, buf))) return -1;
+    return 0;
+}
+#define NTFS_CMD_MAX_VOLS 8
+static EFI_BLOCK_IO_PROTOCOL *ntfscmd_vols[NTFS_CMD_MAX_VOLS];
+static int ntfscmd_scan(void)
+{
+    EFI_HANDLE *handles = 0; UINTN handle_count = 0;
+    EFI_LOCATE_HANDLE_BUFFER_FN locate_buf;
+    EFI_HANDLE_PROTOCOL_FN handle_proto;
+    int count = 0, i;
+    if (!gBS) return 0;
+    locate_buf = (EFI_LOCATE_HANDLE_BUFFER_FN)gBS->LocateHandleBuffer;
+    handle_proto = (EFI_HANDLE_PROTOCOL_FN)gBS->HandleProtocol;
+    if (!locate_buf || !handle_proto) return 0;
+    if (EFI_ERROR(locate_buf(2, &EFI_BLOCK_IO_PROTOCOL_GUID, 0, &handle_count, &handles)) || !handles) return 0;
+    for (i = 0; (UINTN)i < handle_count && count < NTFS_CMD_MAX_VOLS; i++) {
+        EFI_BLOCK_IO_PROTOCOL *b = 0;
+        uint8_t sec[512];
+        if (EFI_ERROR(handle_proto(handles[i], &EFI_BLOCK_IO_PROTOCOL_GUID, (void **)&b)) || !b || !b->Media) continue;
+        if (!b->Media->MediaPresent || b->Media->BlockSize != 512) continue;
+        if (EFI_ERROR(b->ReadBlocks(b, b->Media->MediaId, 0, 512, sec))) continue;
+        if (sec[510] != 0x55 || sec[511] != 0xAA) continue;
+        if (!(sec[3] == 'N' && sec[4] == 'T' && sec[5] == 'F' && sec[6] == 'S')) continue;
+        ntfscmd_vols[count++] = b;
+    }
+    if (gBS->FreePool) gBS->FreePool(handles);
+    return count;
+}
+static int ntfscmd_mount_vol(int vol, int writable, ntfs_block_ops_t *ops, ntfscmd_blk_t *blk, ntfs_info_t *info)
+{
+    int r;
+    if (vol < 0 || vol >= ntfscmd_scan()) return NTFS_ERR_BAD_ARG;
+    blk->bio = ntfscmd_vols[vol];
+    ops->read = ntfscmd_blk_read;
+    ops->write = writable ? ntfscmd_blk_write : 0;
+    ops->ctx = blk;
+    r = ntfs_mount(ops, writable, info);
+    if (r != NTFS_OK) ntfs_unmount();
+    return r;
+}
+static void terminal_ntfs_command(CHAR16 *argv[], int argc)
+{
+    char path[256], text[4096], line[512];
+    ntfs_block_ops_t ops;
+    ntfscmd_blk_t blk;
+    ntfs_info_t info;
+    int r, i;
+    if (argc < 2) {
+        int n = ntfscmd_scan();
+        if (n == 0) { terminal_write_ascii_line("No NTFS volumes found."); return; }
+        for (i = 0; i < n; i++) {
+            int p = 0;
+            blk.bio = ntfscmd_vols[i];
+            ops.read = ntfscmd_blk_read; ops.write = 0; ops.ctx = &blk;
+            r = ntfs_mount(&ops, 0, &info);
+            partcmd_append(line, sizeof(line), &p, "  [");
+            partcmd_append_u64(line, sizeof(line), &p, (uint64_t)i);
+            partcmd_append(line, sizeof(line), &p, "] ");
+            if (r == NTFS_OK) {
+                partcmd_append(line, sizeof(line), &p, info.volume_label[0] ? info.volume_label : "(no label)");
+                partcmd_append(line, sizeof(line), &p, " ");
+                partcmd_append_u64(line, sizeof(line), &p, info.total_clusters * (uint64_t)info.cluster_bytes / (1024 * 1024));
+                partcmd_append(line, sizeof(line), &p, " MB");
+                if (info.dirty) partcmd_append(line, sizeof(line), &p, " DIRTY (writes refused)");
+                if (info.hibernated) partcmd_append(line, sizeof(line), &p, " HIBERNATED (writes refused)");
+                ntfs_unmount();
+            } else {
+                partcmd_append(line, sizeof(line), &p, "unreadable: ");
+                partcmd_append(line, sizeof(line), &p, ntfs_error_name(r));
+            }
+            terminal_write_ascii_line(line);
+        }
+        terminal_write_ascii_line("usage: ntfs ls <vol> [path] | ntfs cat <vol> <path> | ntfs write <vol> <path> <text> | ntfs del <vol> <path> | ntfs mkdir <vol> <path>");
+        return;
+    }
+    if (argc < 3) { terminal_write_ascii_line("usage: ntfs ls <vol> [path] | ntfs cat <vol> <path> | ntfs write <vol> <path> <text> | ntfs del <vol> <path> | ntfs mkdir <vol> <path>"); return; }
+    {
+        uint64_t v;
+        if (!install_parse_u64(argv[2], &v) || v >= NTFS_CMD_MAX_VOLS) { terminal_write_ascii_line("Invalid volume number. Type ntfs to list volumes."); return; }
+        if (install_equal_ascii(argv[1], "ls")) {
+            ntfs_entry_t entries[32];
+            int count = 0, j;
+            path[0] = 0;
+            if (argc >= 4) partcmd_to_ascii(argv[3], path, sizeof(path));
+            r = ntfscmd_mount_vol((int)v, 0, &ops, &blk, &info);
+            if (r != NTFS_OK) { terminal_write_ascii_line(ntfs_error_name(r)); return; }
+            r = ntfs_list(path[0] ? path : "/", entries, 32, &count);
+            if (r != NTFS_OK) { terminal_write_ascii_line(ntfs_error_name(r)); ntfs_unmount(); return; }
+            for (j = 0; j < count; j++) {
+                int p = 0;
+                partcmd_append(line, sizeof(line), &p, "  ");
+                partcmd_append(line, sizeof(line), &p, entries[j].name);
+                if (entries[j].is_dir) partcmd_append(line, sizeof(line), &p, " <dir>");
+                else { partcmd_append(line, sizeof(line), &p, " "); partcmd_append_u64(line, sizeof(line), &p, entries[j].size); partcmd_append(line, sizeof(line), &p, " bytes"); }
+                terminal_write_ascii_line(line);
+            }
+            if (count == 0) terminal_write_ascii_line("  (empty)");
+            ntfs_unmount();
+            return;
+        }
+        if (install_equal_ascii(argv[1], "cat")) {
+            static uint8_t catbuf[65536];
+            uint64_t got = 0;
+            uint64_t k;
+            if (argc < 4) { terminal_write_ascii_line("usage: ntfs cat <vol> <path>"); return; }
+            partcmd_to_ascii(argv[3], path, sizeof(path));
+            r = ntfscmd_mount_vol((int)v, 0, &ops, &blk, &info);
+            if (r != NTFS_OK) { terminal_write_ascii_line(ntfs_error_name(r)); return; }
+            r = ntfs_read_file(path, catbuf, sizeof(catbuf), &got);
+            ntfs_unmount();
+            if (r != NTFS_OK) { terminal_write_ascii_line(ntfs_error_name(r)); return; }
+            for (k = 0; k < got; k++) {
+                char c = (char)catbuf[k];
+                char s[2];
+                if (c == '\n') { terminal_write_ascii_line(""); continue; }
+                if (c < 32 || c > 126) c = '.';
+                s[0] = c; s[1] = 0;
+                terminal_write_ascii(s);
+            }
+            terminal_write_ascii_line("");
+            if (got == sizeof(catbuf)) terminal_write_ascii_line("(truncated to 64 KiB)");
+            return;
+        }
+        if (install_equal_ascii(argv[1], "write")) {
+            int j, p = 0;
+            if (argc < 5) { terminal_write_ascii_line("usage: ntfs write <vol> <path> <text>"); return; }
+            partcmd_to_ascii(argv[3], path, sizeof(path));
+            for (j = 4; j < argc; j++) {
+                char word[512];
+                partcmd_to_ascii(argv[j], word, sizeof(word));
+                if (j > 4 && p + 1 < (int)sizeof(text)) text[p++] = ' ';
+                { int q = 0; while (word[q] && p + 1 < (int)sizeof(text)) text[p++] = word[q++]; }
+            }
+            text[p] = 0;
+            r = ntfscmd_mount_vol((int)v, 1, &ops, &blk, &info);
+            if (r != NTFS_OK) { terminal_write_ascii_line(ntfs_error_name(r)); return; }
+            r = ntfs_write_file(path, (const uint8_t *)text, (uint64_t)p);
+            ntfs_unmount();
+            terminal_write_ascii_line(r == NTFS_OK ? "Written." : ntfs_error_name(r));
+            return;
+        }
+        if (install_equal_ascii(argv[1], "del")) {
+            if (argc < 4) { terminal_write_ascii_line("usage: ntfs del <vol> <path>"); return; }
+            partcmd_to_ascii(argv[3], path, sizeof(path));
+            r = ntfscmd_mount_vol((int)v, 1, &ops, &blk, &info);
+            if (r != NTFS_OK) { terminal_write_ascii_line(ntfs_error_name(r)); return; }
+            r = ntfs_delete(path);
+            ntfs_unmount();
+            terminal_write_ascii_line(r == NTFS_OK ? "Deleted." : ntfs_error_name(r));
+            return;
+        }
+        if (install_equal_ascii(argv[1], "mkdir")) {
+            if (argc < 4) { terminal_write_ascii_line("usage: ntfs mkdir <vol> <path>"); return; }
+            partcmd_to_ascii(argv[3], path, sizeof(path));
+            r = ntfscmd_mount_vol((int)v, 1, &ops, &blk, &info);
+            if (r != NTFS_OK) { terminal_write_ascii_line(ntfs_error_name(r)); return; }
+            r = ntfs_mkdir(path);
+            ntfs_unmount();
+            terminal_write_ascii_line(r == NTFS_OK ? "Directory created." : ntfs_error_name(r));
+            return;
+        }
+        terminal_write_ascii_line("Unknown ntfs command. Type ntfs for usage.");
+    }
+}
+
+/* ---- `boot` command: saved boot choice (BOOT.CFG) ----
+   Reads/writes \FISIXOS\BOOT.CFG on the selected disk (the
+   one the menu booted from), via the UEFI file protocol, so
+   the choice survives a reboot. See bootcfg.h. */
+static int bootcfg_read_file(bootcfg_t *cfg, char *raw, size_t raw_cap)
+{
+    EFI_FILE_PROTOCOL *file = 0;
+    UINTN count;
+    bootcfg_defaults(cfg);
+    if (!raw || raw_cap < 2) return 0;
+    raw[0] = 0;
+    if (!terminal_open_file((const CHAR16[]){'\\','F','I','S','I','X','O','S','\\','B','O','O','T','.','C','F','G',0}, EFI_FILE_MODE_READ, 0, &file)) return 0;
+    count = raw_cap - 1;
+    if (!EFI_ERROR(file->Read(file, &count, raw))) { raw[count] = 0; bootcfg_parse(raw, cfg); }
+    file->Close(file);
+    return 1;
+}
+static int bootcfg_write_file(const bootcfg_t *cfg)
+{
+    char text[64];
+    EFI_FILE_PROTOCOL *file = 0, *dir = 0;
+    UINTN count = 0;
+    if (bootcfg_format(cfg, text, sizeof(text)) != 0) return 0;
+    if (terminal_open_file((const CHAR16[]){'\\','F','I','S','I','X','O','S',0}, EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, EFI_FILE_DIRECTORY, &dir)) dir->Close(dir);
+    (void)terminal_remove_file((const CHAR16[]){'\\','F','I','S','I','X','O','S','\\','B','O','O','T','.','C','F','G',0});
+    if (!terminal_open_file((const CHAR16[]){'\\','F','I','S','I','X','O','S','\\','B','O','O','T','.','C','F','G',0}, EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, EFI_FILE_ARCHIVE, &file)) return 0;
+    while (text[count]) count++;
+    if (EFI_ERROR(file->Write(file, &count, text))) { file->Close(file); return 0; }
+    if (file->Flush) file->Flush(file);
+    file->Close(file);
+    return 1;
+}
+static void terminal_boot_command(CHAR16 *argv[], int argc)
+{
+    bootcfg_t cfg; char raw[256];
+    if (argc < 2 || install_equal_ascii(argv[1], "show")) {
+        bootcfg_read_file(&cfg, raw, sizeof(raw));
+        install_write_num("boot default = ", (uint64_t)cfg.default_choice, "");
+        install_write_num("boot timeout = ", (uint64_t)cfg.timeout_secs, "s");
+        terminal_write_ascii_line("0 = first Installed disk, as if Enter was pressed.");
+        return;
+    }
+    if (install_equal_ascii(argv[1], "set-default") && argc == 3) {
+        uint64_t v;
+        if (!install_parse_u64(argv[2], &v) || v > 99) { terminal_write_ascii_line("usage: boot set-default <n>  (0-99)"); return; }
+        bootcfg_read_file(&cfg, raw, sizeof(raw));
+        cfg.default_choice = (int)v;
+        terminal_write_ascii_line(bootcfg_write_file(&cfg) ? "Saved to \\FISIXOS\\BOOT.CFG." : "Could not save BOOT.CFG.");
+        return;
+    }
+    if (install_equal_ascii(argv[1], "timeout") && argc == 3) {
+        uint64_t v;
+        if (!install_parse_u64(argv[2], &v) || v > 3600) { terminal_write_ascii_line("usage: boot timeout <secs>  (0-3600, 0 = wait forever)"); return; }
+        bootcfg_read_file(&cfg, raw, sizeof(raw));
+        cfg.timeout_secs = (int)v;
+        terminal_write_ascii_line(bootcfg_write_file(&cfg) ? "Saved to \\FISIXOS\\BOOT.CFG." : "Could not save BOOT.CFG.");
+        return;
+    }
+    terminal_write_ascii_line("usage: boot show | boot set-default <n> | boot timeout <secs>");
 }
 
 /* 2026-10-30, Asher: after entering your password, ask how
@@ -2562,6 +3385,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     } else {
         terminal_write_line((const CHAR16[]){ 'B','o','o','t','i','n','g',' ','t','o',' ','t','h','e',' ','F','i','s','i','x','O','S',' ','G','U','I','.','.','.',0 });
         serial_mark("AUTO_BOOT_GUI");
+    }
+
+    /* Minimum-requirements backstop: the menu already checked
+       for GUI boots, but the terminal-shell "gui" path bypasses
+       the menu. Refuse to load the kernel if the machine fails. */
+    if (!fisix_minreq_checked && !fisix_check_minimum_requirements()) {
+        terminal_write_line((const CHAR16[]){ 'd','o','e','s',' ','n','o','t',' ','m','e','e','t',' ','m','i','n','i','m','u','m',' ','r','e','q','u','i','r','e','m','e','n','t','s',0 });
+        return EFI_LOAD_ERROR;
     }
 
     kernel_boot_info_t boot_info = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };

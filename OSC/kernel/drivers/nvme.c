@@ -1,4 +1,5 @@
 #include "nvme.h"
+#include "block.h"
 
 /* NVMe register offsets. */
 #define NVME_REG_CAP    0x00
@@ -19,8 +20,8 @@ static nvme_info_t g_info;
 static int g_ready;
 
 /* Queue storage: static, 4K aligned, in low kernel memory (<4 GB),
-   so the controller can DMA to it without an IOMMU in QEMU and on
-   typical UEFI identity-mapped boots. */
+   so the controller can DMA to it without an IOMMU on real UEFI
+   identity-mapped boots and in QEMU test VMs. */
 static __attribute__((aligned(4096))) uint8_t g_admin_sq[NVME_QENTRIES * 64];
 static __attribute__((aligned(4096))) uint8_t g_admin_cq[NVME_QENTRIES * 16];
 static __attribute__((aligned(4096))) uint8_t g_io_sq[NVME_QENTRIES * 64];
@@ -250,4 +251,63 @@ int nvme_read_lba(uint64_t lba, uint8_t *buf)
     if (!io_cmd(cmd)) return 0;
     for (i = 0; i < (int)g_info.lba_data_size; i++) buf[i] = g_io_buf[i];
     return 1;
+}
+
+/* Write one LBA. Mirror of nvme_read_lba, opcode 0x01 (Write)
+ * instead of 0x02 (Read); the data is staged through g_io_buf
+ * because the controller DMAs from that buffer.
+ * NOT proven on hardware or in QEMU in this stage: there is no
+ * QEMU/OVMF on this VM to boot it in, and a wrong write can
+ * destroy disk data. Do not call it on a disk with data you
+ * care about until a VM test has written and re-read a scratch
+ * disk. That test is the next step for the kernel block path. */
+int nvme_write_lba(uint64_t lba, const uint8_t *buf)
+{
+    uint8_t cmd[64];
+    int i;
+    uint32_t nlb;
+    if (!g_ready || !buf) return 0;
+    nlb = g_info.lba_data_size / 512;
+    if (nlb == 0) nlb = 1;
+    for (i = 0; i < (int)g_info.lba_data_size; i++) g_io_buf[i] = buf[i];
+    for (i = 0; i < 64; i++) cmd[i] = 0;
+    cmd[0] = 0x01; /* Write */
+    put32(cmd + 4, 1); /* NSID */
+    put64(cmd + 40, lba); /* SLBA */
+    put32(cmd + 48, nlb - 1); /* NLB */
+    put64(cmd + 24, (uint64_t)(uintptr_t)g_io_buf);
+    return io_cmd(cmd) ? 1 : 0;
+}
+
+static int nvme_blk_read(void *ctx, uint64_t lba, uint32_t count, uint8_t *buf)
+{
+    uint32_t i;
+    uint32_t ss = g_info.lba_data_size ? g_info.lba_data_size : 512;
+    (void)ctx;
+    if (!g_ready) return -1;
+    for (i=0;i<count;i++) if (!nvme_read_lba(lba+i, buf + (size_t)i*ss)) return -1;
+    return 0;
+}
+static int nvme_blk_write(void *ctx, uint64_t lba, uint32_t count, const uint8_t *buf)
+{
+    uint32_t i;
+    uint32_t ss = g_info.lba_data_size ? g_info.lba_data_size : 512;
+    (void)ctx;
+    if (!g_ready) return -1;
+    for (i=0;i<count;i++) if (!nvme_write_lba(lba+i, buf + (size_t)i*ss)) return -1;
+    return 0;
+}
+/* Expose namespace 1 as a fisix_block_dev_t. Only valid after a
+ * successful nvme_init(). The device does not own anything; the
+ * NVMe driver keeps its own static queues and buffers. */
+int nvme_block_dev(fisix_block_dev_t *dev)
+{
+    if (!dev || !g_ready || !g_info.ns_valid) return -1;
+    dev->sectors = g_info.ns_size_lba;
+    dev->sector_size = g_info.lba_data_size ? g_info.lba_data_size : 512;
+    dev->ctx = 0;
+    dev->read = nvme_blk_read;
+    dev->write = nvme_blk_write;
+    dev->flush = 0;
+    return 0;
 }

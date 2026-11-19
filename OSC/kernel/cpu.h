@@ -23,6 +23,10 @@ void cpu_init(void);
 int cpu_get_info(cpu_info_t *info);
 int cpu_is_intel(void);
 int cpu_is_tiger_lake(void);
+int cpu_has_sse(void);
+int cpu_has_sse2(void);
+int cpu_has_avx(void);
+int cpu_has_avx2(void);
 const char *cpu_brand(void);
 
 #endif

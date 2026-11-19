@@ -32,7 +32,7 @@ image (HELLO.TXT read back). FAT32 code follows the same path
 
 ## DOS .com
 
-kernel/drivers/dosemu.c is a minimal 8086 emulator for .com files:
+kernel/drivers/caramel.c (Caramel, formerly dosemu) is a minimal 8086 emulator for .com files:
 MOV/ADD/SUB/CMP, jumps, CALL/RET, INT 20h, INT 21h AH=02/09/4C.
 Tested: a hello-world .com prints "HELLO DOS" and exits.
 No file I/O, no full DOS 4.0 kernel - that is a separate project.

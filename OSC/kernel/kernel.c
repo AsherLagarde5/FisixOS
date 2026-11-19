@@ -9,6 +9,7 @@
 #include "drivers/touchscreen.h"
 #include "drivers/smbios.h"
 #include "drivers/nvme.h"
+#include "drivers/ntfs_kernel.h"
 #include "drivers/xhci.h"
 #include "drivers/ps2kbd.h"
 #include "drivers/apic.h"
@@ -20,7 +21,10 @@
 #include "drivers/net.h"
 #include "drivers/syscall.h"
 #include "drivers/proc.h"
+#include "drivers/ring3.h"
 #include "drivers/gui.h"
+#include "drivers/lvgl_port.h"
+#include "drivers/lvgl_win8.h"
 #include "drivers/generic_boot.h"
 #include "drivers/i2c_hid.h"
 
@@ -243,6 +247,17 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
         debug_print(" (generic first, specific drivers next, UEFI fallback last)\n");
     }
 
+    /* Checkpoint 5: ring-3 bring-up (GDT/TSS, page tables,
+       SYSCALL MSRs) BEFORE the IDT, so the IDT gates take the
+       new kernel CS (0x08). If it fails, the kernel still
+       boots; deb_run() refuses Linux ELFs honestly. */
+    fb_stage("RING3 INIT");
+    debug_print("[FisixOS] Calling ring3_init...\n");
+    if (ring3_init(boot_info) == 0)
+        debug_print("[FisixOS] ring3_init OK\n");
+    else
+        debug_print("[FisixOS] ring3_init FAILED (ring-3 unavailable)\n");
+
     /* Checkpoint 5: IDT */
     fb_stage("IDT INIT");
     debug_print("[FisixOS] Calling idt_init...\n");
@@ -251,6 +266,14 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
     syscall_init();
     if (syscall_selftest()) debug_print("[FisixOS] syscall int 0x80 OK (write, ring 0)\n");
     else debug_print("[FisixOS] syscall int 0x80 SELFTEST FAILED\n");
+    if (ring3_ready()) {
+        ring3_install_fault_gates();
+        debug_print("[FisixOS] ring-3 fault gates installed\n");
+        /* Boot self-test: runs the embedded static Linux hello
+           in ring 3 and checks its exact output on serial.
+           A failure is reported, not fatal: boot continues. */
+        ring3_selftest();
+    }
     (void)proc_run_fse;
 
     /* Wi-Fi / network, step 1 only: DETECT, do not claim to connect.
@@ -423,6 +446,11 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
             } else {
                 debug_print("[FisixOS] boot: NVMe READ LBA0 FAILED\n");
             }
+            /* NTFS scan (read-only): find an NTFS partition on this
+               disk and keep its root listing for the GUI NTFS screen. */
+            ntfs_kernel_scan();
+            if (ntfs_kernel_found()) debug_print("[FisixOS] boot: NTFS volume found on NVMe\n");
+            else debug_print("[FisixOS] boot: no NTFS volume on NVMe\n");
         } else {
             debug_print("[FisixOS] boot: NVMe init failed / no NVMe controller found\n");
         }
@@ -577,8 +605,15 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
         if (gui_is_ready()) {
             fb_stage("GUI DRAW");
             gui_show_boot_logo();
-            gui_draw();
-            debug_print("[FisixOS] GUI_START taskbar+window drawn\n");
+            /* LVGL Win8 Start screen IS the UI now, baked in
+             * (2026-11-19): no old-desktop fallback any more.
+             * gui.c still owns input, the cursor, and the app
+             * windows opened from a tile. */
+            lvgl_port_init(boot_info->framebuffer_base, boot_info->framebuffer_width,
+                           boot_info->framebuffer_height, boot_info->framebuffer_pitch);
+            lvgl_win8_init();
+            lvgl_win8_show();
+            debug_print("[FisixOS] GUI_START LVGL Win8 Start screen drawn\n");
             while (1) {
                 gui_poll_input();
                 net_poll();
@@ -630,6 +665,7 @@ void kernel_startup(const kernel_boot_info_t *boot_info)
                     }
                 }
                 gui_tick();
+                lvgl_port_tick();
                 __asm__ volatile ("pause");
             }
         }

@@ -9,13 +9,25 @@ OVMF_VARS_TEMPLATE ?= $(firstword $(wildcard /usr/share/OVMF/OVMF_VARS.fd /usr/s
 CFLAGS    = -ffreestanding -O2 -Wall -Wextra -m64 -mno-red-zone \
             -fno-stack-protector -fpic -fshort-wchar \
             -Iboot -Ikernel -Ikernel/drivers -Ikernel/drivers/system \
+            -Ithird_party/lvgl -Ithird_party/lvgl/src \
             -I/usr/include/efi -I/usr/include/efi/x86_64
+
+# === LVGL (MIT, v9.3.0, vendored in third_party/lvgl) ===
+# LVGL is the UI, permanently baked in (2026-11-19, Asher's call):
+# the Win8 Start screen is the shell, there is no build without
+# LVGL and no FISIX_USE_LVGL flag any more. The LVGL sources
+# are a curated subset (core, software renderer, fonts, the four
+# widgets the Start screen uses); platform drivers, image libs,
+# demos and examples were NOT vendored.
+LVGL_C_SRCS := $(shell find third_party/lvgl/src -name '*.c' 2>/dev/null | grep -v '/arm2d/' | grep -v '/helium/' | grep -v '/neon/')
+LVGL_OBJS   := $(LVGL_C_SRCS:.c=.o)
 
 # === Sources ===
 KERNEL_C_SRCS   := $(shell find kernel -name '*.c' 2>/dev/null)
 KERNEL_ASM_SRCS := $(shell find kernel -name '*.S' 2>/dev/null)
-KERNEL_OBJS     := $(KERNEL_C_SRCS:.c=.o) $(KERNEL_ASM_SRCS:.S=.o)
+KERNEL_OBJS     := $(KERNEL_C_SRCS:.c=.o) $(KERNEL_ASM_SRCS:.S=.o) $(LVGL_OBJS)
 KERNEL_RUNTIME_OBJS := $(filter-out kernel/drivers/eosfs.o kernel/drivers/accounts.o,$(KERNEL_OBJS))
+
 KERNEL_ELF := kernel/kernel.elf
 KERNEL_BIN := kernel.bin
 
@@ -23,7 +35,7 @@ EFI_SRC  = boot/efi_main.c
 EFI_OBJ  = boot/efi_main.o
 EFI_ELF  = EFI/BOOT/BOOTX64.elf
 EFI_BIN  = EFI/BOOT/BOOTX64.EFI
-LOADER_OBJS = $(EFI_OBJ) kernel/drivers/eosfs.o kernel/drivers/accounts.o
+LOADER_OBJS = $(EFI_OBJ) kernel/drivers/eosfs.o kernel/drivers/accounts.o kernel/drivers/part.o kernel/drivers/fat.o kernel/drivers/block.o kernel/drivers/bootcfg.o kernel/drivers/ntfs.o
 # Installed-only copy: same loader source, Installer menu/command
 # compiled out (FISIX_INSTALLED_BUILD=1). The installer writes this
 # file to a target disk as EFI/BOOT/BOOTX64.EFI; it is never a copy
@@ -32,7 +44,7 @@ LOADER_OBJS = $(EFI_OBJ) kernel/drivers/eosfs.o kernel/drivers/accounts.o
 INSTALLED_OBJ = boot/efi_main_installed.o
 INSTALLED_ELF = EFI/BOOT/INSTALLED.elf
 INSTALLED_BIN = EFI/BOOT/INSTAL.BIN
-INSTALLED_LOADER_OBJS = $(INSTALLED_OBJ) kernel/drivers/eosfs.o kernel/drivers/accounts.o
+INSTALLED_LOADER_OBJS = $(INSTALLED_OBJ) kernel/drivers/eosfs.o kernel/drivers/accounts.o kernel/drivers/part.o kernel/drivers/fat.o kernel/drivers/block.o kernel/drivers/bootcfg.o kernel/drivers/ntfs.o
 
 ISO_DIR  = iso
 ISO_IMG  = FisixOS.iso
@@ -109,14 +121,14 @@ $(ESP_IMG): $(EFI_BIN) $(INSTALLED_BIN) $(KERNEL_BIN)
 	mcopy -i $(ESP_IMG) startup.nsh ::/startup.nsh
 	rm -f startup.nsh
 
-# === Create a pure UEFI-bootable ISO (VirtualBox Fixed) ===
+# === Create a pure UEFI-bootable ISO (real UEFI firmware; also works in VirtualBox/QEMU) ===
 iso: $(ESP_IMG)
 	mkdir -p $(ISO_DIR)/EFI/BOOT
 	cp $(EFI_BIN) $(ISO_DIR)/EFI/BOOT/BOOTX64.EFI
 	cp $(INSTALLED_BIN) $(ISO_DIR)/EFI/BOOT/INSTAL.BIN
 	cp $(KERNEL_BIN) $(ISO_DIR)/kernel.bin
-	dd if=/dev/zero of=$(ISO_DIR)/esp.img bs=1M count=4 status=none
-	mkfs.fat -F 12 $(ISO_DIR)/esp.img
+	dd if=/dev/zero of=$(ISO_DIR)/esp.img bs=1M count=16 status=none
+	mkfs.fat -F 16 $(ISO_DIR)/esp.img
 	mmd -i $(ISO_DIR)/esp.img ::/EFI
 	mmd -i $(ISO_DIR)/esp.img ::/EFI/BOOT
 	mcopy -i $(ISO_DIR)/esp.img $(EFI_BIN) ::/EFI/BOOT/BOOTX64.EFI
@@ -142,21 +154,32 @@ iso: $(ESP_IMG)
 		$(ISO_DIR)
 
 
-# === Run in QEMU (directory mode) ===
-run: $(EFI_BIN) $(KERNEL_BIN) fresh-vars
+# === VM TEST-ONLY: Run in QEMU (directory mode) — NOT the real-hardware boot path ===
+# The 2 GB sparse test disk exists so the test VM meets the
+# 1 GB minimum-storage requirement enforced at boot
+# (docs/MINIMUM-REQUIREMENTS.md). Without it, `make run`
+# (tiny FAT directory drive) and `make run-iso` (22 MB CD)
+# would both be refused for having no disk >= 1 GB.
+# Sparse, so it costs almost no real disk space until written.
+QEMU_TEST_DISK ?= qemu-test-disk.img
+$(QEMU_TEST_DISK):
+	dd if=/dev/zero of=$@ bs=1M count=0 seek=2048 status=none
+run: $(EFI_BIN) $(KERNEL_BIN) $(QEMU_TEST_DISK) fresh-vars
 	cp $(KERNEL_BIN) EFI/kernel.bin
 	$(QEMU) -m 512 \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,file=OVMF_VARS.fd \
 		-drive format=raw,file=fat:rw:EFI \
+		-hdb $(QEMU_TEST_DISK) \
 		-net none
 
-# === Run in QEMU (ISO mode) ===
-run-iso: iso fresh-vars
+# === VM TEST-ONLY: Run in QEMU (ISO mode) — NOT the real-hardware boot path ===
+run-iso: iso $(QEMU_TEST_DISK) fresh-vars
 	$(QEMU) -m 512 \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,file=OVMF_VARS.fd \
 		-cdrom $(ISO_IMG) \
+		-hdb $(QEMU_TEST_DISK) \
 		-boot d \
 		-net none
 

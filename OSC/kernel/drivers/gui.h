@@ -29,6 +29,8 @@ int gui_load_jpeg(const uint8_t *data, uint32_t len);
    was completed and the screen was redrawn, or a key was handled.
    Call this in a tight loop from kernel_startup(). */
 int gui_poll_input(void);
+void gui_open_app_public(const char *name);
+int gui_pointer_down(void);
 void gui_tick(void);
 /* On-screen boot debug, 2026-10-30: serial-only debug is invisible
  * on a laptop with no serial capture, so a hang before GUI draw

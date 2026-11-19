@@ -5,6 +5,7 @@ OSC/kernel.bin
 OSC/esp.img
 OSC/FisixOS.iso
 OSC/OVMF_VARS.fd
+OSC/qemu-test-disk.img
 OSC/EFI/
 OSC/iso/
 OSC/.vs/

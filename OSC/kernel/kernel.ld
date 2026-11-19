@@ -17,9 +17,15 @@ SECTIONS {
   }
 
   .bss : ALIGN(4096) {
+    __bss_start = .;
     *(COMMON)
     *(.bss .bss.*)
+    __bss_end = .;
   }
+
+  /* End of the kernel image. The ring-3 frame allocator
+     (kernel/drivers/ring3.c) never hands out pages below this. */
+  kernel_end = .;
 
   /DISCARD/ : {
     *(.note*)
