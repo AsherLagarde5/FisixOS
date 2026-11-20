@@ -63,7 +63,10 @@ void smbios_set_table(void *table)
         const uint8_t *s = t + off;
         uint8_t type = s[0], slen = s[1];
         uint32_t next;
-        if (slen < 4) break;
+        /* A firmware table may claim a formatted length past the end
+           of the remaining table; the Type 0 handler below reads
+           s[4]/s[5]/s[8], so stop the walk instead of trusting it. */
+        if (slen < 4 || slen > len - off) break;
         if (type == 0 && slen >= 20) {
             copy_str(g_vendor, struct_string(s, len - off, s[4]), 64);
             copy_str(g_version, struct_string(s, len - off, s[5]), 64);
