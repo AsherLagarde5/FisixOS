@@ -70,7 +70,10 @@ static int p_file_rename(const char *a, const char *b)
 static int p_file_mkdir(const char *path) { if (!vfs_mounted()) return -1; return vfs_mkdir(path)==0 ? 0 : -1; }
 static int p_file_exists(const char *path) { if (!vfs_mounted()) return 0; return vfs_exists(path); }
 static int p_file_size(const char *path) { if (!vfs_mounted()) return -1; return (int)vfs_size(path); }
-static void p_get_time(unsigned int *y, unsigned int *mo, unsigned int *d, unsigned int *h, unsigned int *mi, unsigned int *s) { rtc_time_t rt; if (generic_rtc_read(&rt)) { *y=(unsigned int)rt.year; *mo=(unsigned int)rt.month; *d=(unsigned int)rt.day; *h=(unsigned int)rt.hour; *mi=(unsigned int)rt.minute; *s=(unsigned int)rt.second; } else { *y=0; *mo=0; *d=0; *h=0; *mi=0; *s=0; } }
+/* Mirror the loader's fse_api_get_time (efi_main.c): every output
+ * pointer is optional. An .fse app passing NULL for a field it does
+ * not need must not crash the kernel dereferencing it. */
+static void p_get_time(unsigned int *y, unsigned int *mo, unsigned int *d, unsigned int *h, unsigned int *mi, unsigned int *s) { rtc_time_t rt; if (y) *y=0; if (mo) *mo=0; if (d) *d=0; if (h) *h=0; if (mi) *mi=0; if (s) *s=0; if (generic_rtc_read(&rt)) { if (y) *y=(unsigned int)rt.year; if (mo) *mo=(unsigned int)rt.month; if (d) *d=(unsigned int)rt.day; if (h) *h=(unsigned int)rt.hour; if (mi) *mi=(unsigned int)rt.minute; if (s) *s=(unsigned int)rt.second; } }
 static void p_clear_screen(void) { if (g_gui_print_cb) g_gui_print_cb("\n"); }
 static void p_sleep_ms(unsigned int ms) { volatile uint32_t i; uint32_t n = ms * 2000u; for (i=0;i<n;i++) { __asm__ volatile ("pause"); } }
 static int p_file_read(const char *path, char *buf, unsigned int sz)
