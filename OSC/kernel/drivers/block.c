@@ -10,7 +10,10 @@ int block_read_bytes(const fisix_block_dev_t *dev, uint64_t byte_off, uint8_t *b
     ss = dev->sector_size;
     if (ss==0 || ss>4096) return -1;
     if (len==0) return 0;
-    if (byte_off + len > dev->sectors * ss) return -1;
+    /* Overflow-safe range check: byte_off + len can wrap past 2^64,
+     * which would make the old `byte_off + len > sectors * ss` test
+     * pass for an out-of-range request. Compare without adding. */
+    if (len > dev->sectors * ss || byte_off > dev->sectors * ss - len) return -1;
     first = byte_off / ss; last = (byte_off + len - 1) / ss;
     for (s=first; s<=last; s++) {
         uint64_t sec_off = s * ss;
@@ -37,7 +40,8 @@ int block_write_bytes(const fisix_block_dev_t *dev, uint64_t byte_off, const uin
     ss = dev->sector_size;
     if (ss==0 || ss>4096) return -1;
     if (len==0) return 0;
-    if (byte_off + len > dev->sectors * ss) return -1;
+    /* Same overflow-safe range check as block_read_bytes. */
+    if (len > dev->sectors * ss || byte_off > dev->sectors * ss - len) return -1;
     first = byte_off / ss; last = (byte_off + len - 1) / ss;
     for (s=first; s<=last; s++) {
         uint64_t sec_off = s * ss;
