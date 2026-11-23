@@ -14,7 +14,14 @@ static int b_parse_int(const char *s, int *out)
 {
     int v=0, digits=0;
     while (b_is_space(*s)) s++;
-    while (*s>='0' && *s<='9') { v=v*10+(*s-'0'); digits++; s++; }
+    while (*s>='0' && *s<='9') {
+        /* Saturate: stop accumulating once v is past every valid
+           range (max valid value is timeout 3600), so a long digit
+           run can never overflow int via v*10 and wrap back into
+           range. Remaining digits are still counted. */
+        if (v < 100000) v=v*10+(*s-'0');
+        digits++; s++;
+    }
     if (!digits) return 0;
     *out=v; return 1;
 }
