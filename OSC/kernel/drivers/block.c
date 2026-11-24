@@ -73,7 +73,10 @@ static int ramdisk_read(void *ctx, uint64_t lba, uint32_t count, uint8_t *buf)
     fisix_ramdisk_t *rd = (fisix_ramdisk_t *)ctx;
     uint64_t i;
     if (!rd || !buf) return -1;
-    if (lba + count > rd->sectors) return -1;
+    /* Overflow-safe range check, same as block_read_bytes: lba + count
+     * can wrap past 2^64, which would pass an out-of-range request.
+     * Compare without adding. */
+    if (count > rd->sectors || lba > rd->sectors - count) return -1;
     for (i=0;i<(uint64_t)count * rd->sector_size;i++) buf[i] = rd->buf[lba * rd->sector_size + i];
     return 0;
 }
@@ -82,7 +85,8 @@ static int ramdisk_write(void *ctx, uint64_t lba, uint32_t count, const uint8_t 
     fisix_ramdisk_t *rd = (fisix_ramdisk_t *)ctx;
     uint64_t i;
     if (!rd || !buf) return -1;
-    if (lba + count > rd->sectors) return -1;
+    /* Same overflow-safe range check as ramdisk_read. */
+    if (count > rd->sectors || lba > rd->sectors - count) return -1;
     for (i=0;i<(uint64_t)count * rd->sector_size;i++) rd->buf[lba * rd->sector_size + i] = buf[i];
     return 0;
 }
