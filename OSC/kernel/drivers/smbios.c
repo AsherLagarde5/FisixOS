@@ -46,10 +46,14 @@ void smbios_set_table(void *table)
     g_vendor[0] = 0; g_version[0] = 0; g_date[0] = 0;
     if (!ep) return;
     if (ep[0] == '_' && ep[1] == 'S' && ep[2] == 'M' && ep[3] == '3' && ep[4] == '_') {
-        /* SMBIOS 3.x entry point: table address at offset 16 (64-bit). */
+        /* SMBIOS 3.x entry point: table address at offset 16 (64-bit),
+           maximum table size at offset 12. Use the reported size so the
+           walk below stays inside the real table; keep the old 64 KiB
+           ceiling for a missing or implausible value. */
         t = (const uint8_t *)(uintptr_t)(*(const uint64_t *)(ep + 16));
-        /* No total length in the 3.x entry point; walk until Type 127. */
-        len = 0x10000;
+        len = (uint32_t)ep[12] | ((uint32_t)ep[13] << 8) |
+              ((uint32_t)ep[14] << 16) | ((uint32_t)ep[15] << 24);
+        if (len == 0 || len > 0x10000) len = 0x10000;
     } else if (ep[0] == '_' && ep[1] == 'S' && ep[2] == 'M' && ep[3] == '_') {
         len = (uint32_t)ep[22] | ((uint32_t)ep[23] << 8);
         t = (const uint8_t *)(uintptr_t)(*(const uint32_t *)(ep + 24));
