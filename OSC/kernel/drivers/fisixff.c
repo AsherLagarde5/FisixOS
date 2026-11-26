@@ -17,4 +17,4 @@ static int ff_parse(const uint8_t *img, size_t len, const char *want, const uint
     return want ? -2 : 0;
 }
 int ff_list(const uint8_t *img, size_t len, char *out, size_t out_size){ if (!out || out_size==0) return -1; out[0]=0; return ff_parse(img,len,0,0,0,out,out_size); }
-int ff_read(const uint8_t *img, size_t len, const char *name, const uint8_t **data, uint32_t *size){ return ff_parse(img,len,name,data,size,0,0); }
+int ff_read(const uint8_t *img, size_t len, const char *name, const uint8_t **data, uint32_t *size){ if (!name) return -1; /* A NULL name used to fall through and return 0 (success) with data/size untouched; fail cleanly instead, like ff_list() does for a NULL buffer. */ return ff_parse(img,len,name,data,size,0,0); }
