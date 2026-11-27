@@ -177,6 +177,13 @@ static void accounts_load(void)
         for (int i = 0; i < account_count; ++i)
             accounts[i] = store.entries[i];
 
+        /* Force NUL termination: a hand-edited store could lack one,
+           and the string helpers would then read past the field. */
+        for (int i = 0; i < account_count; ++i) {
+            accounts[i].name[ACCOUNT_TEXT_MAX] = 0;
+            accounts[i].password[ACCOUNT_TEXT_MAX] = 0;
+        }
+
         /* Zero unused entries */
         for (int i = account_count; i < FISIX_MAX_USERS; ++i) {
             accounts[i].name[0] = 0;
