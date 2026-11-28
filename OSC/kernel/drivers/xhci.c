@@ -32,7 +32,12 @@ int xhci_detect(xhci_info_t *out)
     if (!pci_find_device(0x0C, 0x03, 0x30, &dev)) return 0;
     out->pci = dev;
     out->bar = pci_read_bar64(&dev, 0);
-    if (!out->bar) return 0;
+    /* pci_read_bar64() masks the low 4 bits off, so an IO-space BAR
+       comes back with bit 0 already clear: testing out->bar & 1 here
+       could never fire. Test the raw BAR0 instead — pci_read_bar()
+       returns the config value unmasked. */
+    if (!out->bar || (pci_read_bar(&dev, 0) & 1)) return 0; /* IO-space BAR: no MMIO to read */
+    { uint32_t cmd_addr = 0x80000000u | ((uint32_t)dev.bus << 16) | ((uint32_t)dev.device << 11) | ((uint32_t)dev.function << 8) | 0x04u; uint32_t cmd_val; __asm__ volatile ("outl %0, %1" : : "a"(cmd_addr), "d"((uint16_t)0xCF8u)); __asm__ volatile ("inl %1, %0" : "=a"(cmd_val) : "d"((uint16_t)0xCFCu)); if (!(cmd_val & 0x02)) return 0; /* memory space not enabled: MMIO read could fault before IDT */ }
     g_bar = out->bar;
     out->version = (uint16_t)((cap32(0) >> 16) & 0xFFFF);
     hcsparams1 = cap32(0x04);
@@ -47,7 +52,10 @@ int xhci_init(xhci_info_t *out)
     uint32_t cmd, sts, t;
     if (!pci_find_device(0x0C, 0x03, 0x30, &dev)) return 0;
     g_bar = pci_read_bar64(&dev, 0);
-    if (!g_bar) return 0;
+    /* Same IO-space BAR guard as xhci_detect(): init did MMIO reads
+       with no guard at all, and pci_read_bar64() masks bit 0 off, so
+       the raw BAR0 must be tested (see xhci_detect). */
+    if (!g_bar || (pci_read_bar(&dev, 0) & 1)) return 0;
     /* Enable bus mastering + memory space. */
     {
         uint32_t addr = 0x80000000u | ((uint32_t)dev.bus << 16) | ((uint32_t)dev.device << 11) | ((uint32_t)dev.function << 8) | 0x04u;
